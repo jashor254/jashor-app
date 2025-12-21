@@ -1,3 +1,4 @@
+cat > .gitignore << 'EOF'
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
@@ -32,6 +33,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +41,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Custom additions for security
+/data/
+/scripts/
+/src/app/test-db/
+/src/app/api/test*/
+/src/app/seedwithexplicitEnv.js
+EOF

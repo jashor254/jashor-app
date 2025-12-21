@@ -3,7 +3,7 @@ import HeroSection from "./components/HeroSection";
 import CoursesSection from "./components/CoursesSection";
 import TestimonialsSection from "./components/TestimonialsSection";
 import CTASection from "./components/CTASection";
-import Footer from "./components/Footer"; // 👈🏽 newly added
+import Footer from "./components/Footer";
 
 export default function Home() {
   return (
@@ -13,7 +13,7 @@ export default function Home() {
       <CoursesSection />
       <TestimonialsSection />
       <CTASection />
-      <Footer /> {/* 👈🏽 Footer comes last */}
+      <Footer />
     </>
   );
 }
