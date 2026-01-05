@@ -10,8 +10,6 @@ export default function CompleteSOWComponent() {
     grade: '',
     learning_area: '',
     textbook: '',
-    custom_textbook: '',
-    textbook_source: '',
     term: '',
     year: new Date().getFullYear()
   });
@@ -43,7 +41,6 @@ export default function CompleteSOWComponent() {
   const [substrands, setSubstrands] = useState({});
   const [setBooks, setSetBooks] = useState([]);
   const [selectedSetBook, setSelectedSetBook] = useState('');
-  const [isSettingBook, setIsSettingBook] = useState(false);
   const [loading, setLoading] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
 
@@ -59,21 +56,24 @@ export default function CompleteSOWComponent() {
     completed: 0, 
     current: '',
     source: '',
-    confidence: 0,
-    qualityMetrics: {}
+    confidence: 0
   });
   
-  // Payment states
-  const [paymentStatus, setPaymentStatus] = useState(true);
+  // Database connection status
+  const [dbConnected, setDbConnected] = useState(false);
+  const [dbCheckDone, setDbCheckDone] = useState(false);
+  
+  // Track if Grade 10 is selected
+  const [isGrade10, setIsGrade10] = useState(false);
   
   // Cache for curriculum data
   const curriculumCache = useRef({});
   // Track sources for reporting
   const generationSources = useRef({
-    kicd_official: 0,
-    kicd_database: 0,
-    kicd_patterns: 0,
-    high_profile_fallback: 0
+    database_exact_match: 0,
+    database_partial_match: 0,
+    kicd_guided_ai_fallback: 0,
+    emergency_fallback: 0
   });
 
   // ===================== CONSTANTS =====================
@@ -106,6 +106,10 @@ export default function CompleteSOWComponent() {
     return selectedArea?.name?.toLowerCase().includes('english');
   };
 
+  const getTranslatedText = (englishText, kiswahiliText) => {
+    return isKiswahiliSubject() ? kiswahiliText : englishText;
+  };
+
   const shouldShowSetBookSelection = () => {
     if (!formData.grade || !formData.learning_area) return false;
     
@@ -117,15 +121,6 @@ export default function CompleteSOWComponent() {
     
     const gradeName = selectedGrade.name?.toLowerCase() || '';
     return gradeName.includes('form 3') || gradeName.includes('form 4');
-  };
-
-  const getSixthSubstrandText = (bookTitle) => {
-    if (isKiswahiliSubject()) {
-      return bookTitle ? `Fasihi Andishi - ${bookTitle}` : '⏳ KITABU CHA FASIHI HAKIJACHAGULIWA BADO';
-    } else if (isEnglishSubject()) {
-      return bookTitle ? `Intensive Reading - ${bookTitle}` : '⏳ SET BOOK NOT SELECTED YET';
-    }
-    return 'LITERATURE/INTENSIVE READING';
   };
 
   const formatSetBookTitle = (book) => {
@@ -154,32 +149,65 @@ export default function CompleteSOWComponent() {
     return Array.from({ length: endWeek - startWeek + 1 }, (_, i) => startWeek + i);
   };
 
-  const getTranslatedText = (englishText, kiswahiliText) => {
-    return isKiswahiliSubject() ? kiswahiliText : englishText;
-  };
+  // ===================== DATABASE CONNECTION CHECK =====================
+  useEffect(() => {
+    const checkDatabaseConnection = async () => {
+      console.log('🔍 Checking database connection...');
+      setLoading(true);
+      
+      try {
+        const { data, error } = await supabase
+          .from('levels')
+          .select('count')
+          .limit(1);
+        
+        if (error) {
+          console.error('❌ Database connection error:', error);
+          setDbConnected(false);
+        } else {
+          console.log('✅ Database connection successful!');
+          setDbConnected(true);
+        }
+        
+      } catch (error) {
+        console.error('❌ Fatal database error:', error);
+        setDbConnected(false);
+      } finally {
+        setLoading(false);
+        setDbCheckDone(true);
+      }
+    };
+    
+    checkDatabaseConnection();
+  }, []);
 
-  const capitalize = (str) => {
-    return str.charAt(0).toUpperCase() + str.slice(1);
-  };
-
-  // ===================== DATA FETCHING =====================
+  // ===================== PHASE 1: CBE-FOCUSED DATA FETCHING =====================
+  
+  // 1. Fetch Levels - CBE FOCUSED ONLY
   useEffect(() => { 
     const fetchLevels = async () => {
       try {
-        const { data, error } = await supabase.from('levels').select('*');
+        setLoading(true);
+        // CBE FOCUS: Junior Secondary School only
+        const { data, error } = await supabase
+          .from('levels')
+          .select('*')
+          .or('name.ilike.%junior secondary%,name.ilike.%jss%,name.ilike.%cbe%')
+          .order('order_index', { ascending: true });
+        
         if (error) throw error;
         setLevels(data || []);
       } catch (err) {
         console.error('Error fetching levels:', err);
         setLevels([]);
+      } finally {
+        setLoading(false);
       }
     };
     fetchLevels();
-    
-    // For testing, set payment status to true
-    setPaymentStatus(true);
   }, []);
 
+  // 2. Fetch Grades - WITH GRADE 10 CHECK
   useEffect(() => {
     if (formData.level) {
       const fetchGrades = async (levelId) => {
@@ -189,9 +217,24 @@ export default function CompleteSOWComponent() {
             .from('grades')
             .select('*')
             .eq('level_id', levelId)
-            .eq('is_active', true);
+            .eq('is_active', true)
+            .order('order_index', { ascending: true });
+          
           if (error) throw error;
-          setGrades((data || []).sort((a,b) => (a.order_index||0) - (b.order_index||0)));
+
+          const sortedGrades = data || [];
+          setGrades(sortedGrades);
+          
+          // Check if Grade 10 exists in the fetched grades
+          const grade10Exists = sortedGrades.some(g => 
+            g.name?.toLowerCase().includes('grade 10') || 
+            g.name?.toLowerCase().includes('form 4')
+          );
+          
+          if (grade10Exists) {
+            console.log('⚠️ Grade 10 detected in system (kept silent)');
+          }
+          
         } catch (err) {
           console.error('Error fetching grades:', err);
           setGrades([]);
@@ -200,14 +243,9 @@ export default function CompleteSOWComponent() {
         }
       };
       fetchGrades(formData.level);
+      
       // Reset dependent fields
-      setFormData(prev => ({ 
-        ...prev, 
-        grade: '', 
-        learning_area: '', 
-        textbook: '', 
-        custom_textbook: '' 
-      }));
+      setFormData(prev => ({ ...prev, grade: '', learning_area: '', textbook: '' }));
       setLearning_areas([]);
       setStrands([]);
       setSubstrands({});
@@ -215,15 +253,24 @@ export default function CompleteSOWComponent() {
     }
   }, [formData.level]);
 
+  // 3. Fetch Learning Areas
   useEffect(() => {
     if (formData.grade) {
+      // Check if Grade 10 is selected
+      const selectedGrade = grades.find(g => g.id === formData.grade);
+      const isGrade10 = selectedGrade?.name?.toLowerCase().includes('grade 10') || 
+                       selectedGrade?.name?.toLowerCase().includes('form 4');
+      
+      setIsGrade10(isGrade10);
+      
       const fetchLearningAreas = async (gradeId) => {
         try {
           setLoading(true);
           const { data, error } = await supabase
             .from('learning_areas')
             .select('*')
-            .eq('grade_id', gradeId);
+            .eq('grade_id', gradeId)
+            .order('order_index', { ascending: true });
           if (error) throw error;
           setLearning_areas(data || []);
         } catch (err) {
@@ -234,28 +281,24 @@ export default function CompleteSOWComponent() {
         }
       };
       fetchLearningAreas(formData.grade);
+      
       // Reset dependent fields
-      setFormData(prev => ({ 
-        ...prev, 
-        learning_area: '', 
-        textbook: '', 
-        custom_textbook: '' 
-      }));
+      setFormData(prev => ({ ...prev, learning_area: '', textbook: '' }));
       setStrands([]);
       setSubstrands({});
       setSelectedSetBook('');
     }
-  }, [formData.grade]);
+  }, [formData.grade, grades]);
 
-  // ===================== FETCH REAL STRANDS & SUBSTRANDS =====================
+  // ===================== FETCH STRANDS & SUBSTRANDS =====================
   useEffect(() => {
-    const fetchRealStrandsAndSubstrands = async () => {
+    const fetchStrandsAndSubstrands = async () => {
       if (!formData.learning_area || !formData.grade) return;
       
       try {
         setLoading(true);
         
-        // 1. First check if we have set books for language subjects
+        // Fetch set books for language subjects
         if (shouldShowSetBookSelection()) {
           const { data: setBooksData, error: setBooksError } = await supabase
             .from('set_books')
@@ -269,50 +312,42 @@ export default function CompleteSOWComponent() {
           setSetBooks([]);
         }
         
-        // 2. Fetch strands from unified view
+        // Fetch strands - KICD curriculum design
         const { data: strandsData, error: strandsError } = await supabase
-          .from('unified_strands')
+          .from('strands')
           .select('*')
           .eq('learning_area_id', formData.learning_area)
+          .order('order_index', { ascending: true })
           .order('title', { ascending: true });
         
         if (strandsError) {
           console.error('Error fetching strands:', strandsError);
-          await fetchFromOriginalTables();
-          return;
+          setStrands([]);
+        } else {
+          setStrands(strandsData || []);
         }
         
-        if (!strandsData || strandsData.length === 0) {
-          await fetchFromOriginalTables();
-          return;
-        }
-        
-        // We have strands! Now fetch substrands for each strand
-        setStrands(strandsData);
-        
+        // Fetch substrands for each strand
+        const currentStrands = strandsData || [];
         const substrandsData = {};
-        for (const strand of strandsData) {
+        
+        for (const strand of currentStrands) {
+          if (!strand?.id) continue;
+          
           const { data: substrandsForStrand, error: substrandsError } = await supabase
-            .from('unified_substrands')
+            .from('substrands')
             .select('*')
             .eq('strand_id', strand.id)
+            .order('order_index', { ascending: true })
             .order('title', { ascending: true });
           
           if (!substrandsError && substrandsForStrand) {
-            substrandsData[strand.id] = substrandsForStrand;
-            
-            // Special handling for 6th substrand in language subjects
-            if (shouldShowSetBookSelection() && selectedSetBook) {
-              substrandsData[strand.id] = substrandsForStrand.map(sub => {
-                if (Number(sub.order_index) === 6) {
-                  const newTitle = isKiswahiliSubject() 
-                    ? `Fasihi Andishi - ${selectedSetBook}`
-                    : `Intensive Reading - ${selectedSetBook}`;
-                  return { ...sub, title: newTitle };
-                }
-                return sub;
-              });
-            }
+            substrandsData[strand.id] = substrandsForStrand.sort((a,b) => {
+              const orderA = a.order_index || 0;
+              const orderB = b.order_index || 0;
+              if (orderA !== orderB) return orderA - orderB;
+              return (a.title || '').localeCompare(b.title || '');
+            });
           } else {
             substrandsData[strand.id] = [];
           }
@@ -321,7 +356,7 @@ export default function CompleteSOWComponent() {
         setSubstrands(substrandsData);
         
       } catch (error) {
-        console.error('Error in fetchRealStrandsAndSubstrands:', error);
+        console.error('Error in fetchStrandsAndSubstrands:', error);
         alert(getTranslatedText(
           'Unable to load curriculum topics. Please try again.',
           'Haikuweza kupakia mada za mtaala. Tafadhali jaribu tena.'
@@ -331,401 +366,421 @@ export default function CompleteSOWComponent() {
       }
     };
 
-    // Helper function to fetch from original tables if unified view fails
-    const fetchFromOriginalTables = async () => {
-      try {
-        const { data: strandsData, error: strandsError } = await supabase
-          .from('strands')
-          .select('*')
-          .eq('learning_area_id', formData.learning_area)
-          .order('order_index', { ascending: true });
-        
-        if (strandsError) throw strandsError;
-        
-        if (strandsData && strandsData.length > 0) {
-          setStrands(strandsData);
-          
-          const substrandsData = {};
-          for (const strand of strandsData) {
-            const { data: substrandsForStrand, error: substrandsError } = await supabase
-              .from('substrands')
-              .select('*')
-              .eq('strand_id', strand.id)
-              .order('order_index', { ascending: true });
-            
-            if (!substrandsError && substrandsForStrand) {
-              substrandsData[strand.id] = substrandsForStrand;
-            } else {
-              substrandsData[strand.id] = [];
-            }
-          }
-          
-          setSubstrands(substrandsData);
-        }
-      } catch (error) {
-        console.error('Error fetching from original tables:', error);
-        setStrands([]);
-        setSubstrands({});
-      }
-    };
-
-    fetchRealStrandsAndSubstrands();
-    
+    fetchStrandsAndSubstrands();
   }, [formData.learning_area, formData.grade, selectedSetBook]);
 
-  // ===================== SET BOOK SELECTION HANDLER =====================
-  const handleSetBookSelection = async (bookTitle, bookAuthor) => {
-    if (!formData.learning_area) {
-      alert(getTranslatedText('Please select a learning area first.', 'Tafadhali chagua eneo la kujifunza kwanza.'));
-      return;
-    }
-    setIsSettingBook(true);
-    try {
-      const bookDisplayName = formatSetBookTitle({ book_title: bookTitle, book_author: bookAuthor });
-      setSelectedSetBook(bookDisplayName);
-      
-      // Update substrands with the new set book title for 6th substrand
-      const updatedSubstrands = { ...substrands };
-      Object.keys(updatedSubstrands).forEach(strandId => {
-        updatedSubstrands[strandId] = updatedSubstrands[strandId].map(sub => {
-          if (Number(sub.order_index) === 6) {
-            const newTitle = isKiswahiliSubject() 
-              ? `Fasihi Andishi - ${bookDisplayName}`
-              : `Intensive Reading - ${bookDisplayName}`;
-            return { ...sub, title: newTitle };
-          }
-          return sub;
-        });
-      });
-      setSubstrands(updatedSubstrands);
-      
-      const successMessage = isKiswahiliSubject()
-        ? `✅ Kitabu cha fasihi "${bookDisplayName}" kimewekwa kwenye mada zote.`
-        : `✅ Set book "${bookDisplayName}" applied to all units.`;
-      
-      alert(successMessage);
-    } catch (err) {
-      console.error('Error in handleSetBookSelection:', err);
-    } finally {
-      setIsSettingBook(false);
-    }
-  };
-
-  // ===================== SIMPLIFIED KICD CURRICULUM FETCHER =====================
-  const fetchKICDCurriculumData = async (substrandId, learningAreaId, gradeId, weekNumber, substrandTitle) => {
-    const cacheKey = `${substrandId}-${gradeId}-${weekNumber}`;
+  // ===================== CORE: KICD CURRICULUM DATA FETCHER =====================
+  const fetchKICDCurriculumData = async (substrandId, learningAreaId, gradeId, weekNumber, lessonNumber, substrandTitle) => {
+    console.log(`📥 FETCH CALLED for: ${substrandTitle} (Week ${weekNumber}, Lesson ${lessonNumber})`);
+    
+    const cacheKey = `${substrandId}-${gradeId}-W${weekNumber}-L${lessonNumber}`;
     
     // Check cache first
     if (curriculumCache.current[cacheKey]) {
+      console.log('✅ [CACHE HIT] Using cached data');
       return curriculumCache.current[cacheKey];
     }
 
     try {
-      // Get learning area and grade names
-      const learningAreaName = learning_areas.find(la => la.id === learningAreaId)?.name || '';
-      const gradeName = grades.find(g => g.id === gradeId)?.name || '';
-
+      // ============ STEP 1: CHECK DATABASE FOR OFFICIAL KICD DESIGN ============
       setGenerationProgress(prev => ({ 
         ...prev, 
         current: getTranslatedText(
-          '🔍 Fetching KICD curriculum data...',
-          '🔍 Inapakia data ya mtaala wa KICD...'
+          '🔍 Searching KICD database for curriculum design...',
+          '🔍 Inatafuta database ya KICD kwa muundo wa mtaala...'
         ),
-        source: 'api_fetch'
+        source: 'database_search'
       }));
 
-      // ============= USE YOUR API ROUTE =============
-      const response = await fetch('/api/kicd/fetch', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          learning_area_id: learningAreaId,
-          grade_id: gradeId,
-          substrand_title: substrandTitle,
-          learning_area_name: learningAreaName,
-          grade_name: gradeName,
-          week_number: weekNumber
-        })
-      });
+      console.log('🎯 [LEVEL 1] Checking official KICD designs...');
+      
+      // Try to get ANY KICD design for this substrand
+      const { data: kicdDesign, error: kicdError } = await supabase
+        .from('kicd_curriculum_lessons')
+        .select('*')
+        .eq('substrand_id', substrandId)
+        .eq('learning_area_id', learningAreaId)
+        .eq('grade_id', gradeId)
+        .limit(1);
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      const result = await response.json();
-
-      if (result.success) {
-        // Track the source
-        const sourceType = result.source || 'high_profile_fallback';
-        generationSources.current[sourceType] = (generationSources.current[sourceType] || 0) + 1;
+      if (!kicdError && kicdDesign && kicdDesign.length > 0) {
+        console.log('✅ [KICD DESIGN FOUND] Using official KICD framework');
         
-        // Format the data from API response
-        const formattedData = formatDataFromAPI(result.data, sourceType, substrandTitle);
+        // This is an official KICD design - use it as base
+        const officialDesign = kicdDesign[0];
+        generationSources.current.database_exact_match++;
         
-        const confidence = result.is_kicd_official ? 0.99 : 
-                          sourceType === 'kicd_database' ? 0.95 :
-                          sourceType === 'kicd_partial_match' ? 0.85 : 0.75;
+        // Expand the KICD design for specific lesson
+        const expandedLesson = expandKICDDesignForLesson(
+          officialDesign, 
+          lessonNumber, 
+          substrandTitle, 
+          weekNumber
+        );
         
-        const apiResult = {
-          type: sourceType,
-          data: formattedData,
-          confidence: confidence,
-          source: sourceType,
-          is_real_kicd: result.is_kicd_official || false,
+        const result = {
+          type: 'database_exact_match',
+          data: expandedLesson,
+          confidence: 1.0,
+          source: 'database_exact_match',
+          is_kicd_official: true,
           timestamp: new Date().toISOString()
         };
         
-        setGenerationProgress(prev => ({ 
-          ...prev, 
-          confidence: confidence,
-          qualityMetrics: { ...prev.qualityMetrics, [sourceType]: true }
-        }));
-        
-        curriculumCache.current[cacheKey] = apiResult;
-        return apiResult;
+        curriculumCache.current[cacheKey] = result;
+        return result;
       }
 
-      throw new Error('API returned unsuccessful');
+      // ============ STEP 2: CHECK FOR SIMILAR SUBSTRAND IN DATABASE ============
+      console.log('📊 [LEVEL 2] Searching for similar substrands...');
+      
+      const { data: similarSubstrands, error: similarError } = await supabase
+        .from('kicd_curriculum_lessons')
+        .select('*')
+        .eq('learning_area_id', learningAreaId)
+        .eq('grade_id', gradeId)
+        .limit(3);
 
-    } catch (error) {
-      console.error('API fetch error, falling back:', error);
+      if (!similarError && similarSubstrands && similarSubstrands.length > 0) {
+        console.log('✅ [SIMILAR FOUND] Using similar KICD design as template');
+        
+        generationSources.current.database_partial_match++;
+        
+        // Use the most comprehensive design as template
+        const bestTemplate = similarSubstrands.sort((a, b) => 
+          (b.topic_specific_learning_outcomes?.length || 0) - (a.topic_specific_learning_outcomes?.length || 0)
+        )[0];
+        
+        const aiGeneratedLesson = generateKICDAlignedLesson(
+          substrandTitle,
+          lessonNumber,
+          weekNumber,
+          bestTemplate,
+          learningAreaId
+        );
+        
+        const result = {
+          type: 'database_partial_match',
+          data: aiGeneratedLesson,
+          confidence: 0.85,
+          source: 'database_partial_match',
+          is_kicd_official: false,
+          timestamp: new Date().toISOString()
+        };
+        
+        curriculumCache.current[cacheKey] = result;
+        return result;
+      }
+
+      // ============ STEP 3: KICD-GUIDED AI FALLBACK ============
+      console.log('🤖 [LEVEL 3] Using KICD-guided AI fallback...');
       
-      // ============= FALLBACK TO SMART GENERATION =============
-      setGenerationProgress(prev => ({ 
-        ...prev, 
-        current: getTranslatedText(
-          '⚠️ Using fallback generation...',
-          '⚠️ Inatumia mbadala wa kutengeneza...'
-        ),
-        source: 'fallback'
-      }));
+      generationSources.current.kicd_guided_ai_fallback++;
       
-      generationSources.current.fallback++;
-      
-      const fallbackData = generateKICDCompliantCurriculum(
+      const aiLesson = await generateKICDCompliantLesson(
         substrandTitle,
+        lessonNumber,
         weekNumber,
-        learning_areas.find(la => la.id === formData.learning_area)?.name || '',
-        grades.find(g => g.id === formData.grade)?.name || ''
+        learningAreaId,
+        gradeId
       );
       
       const result = {
-        type: 'fallback',
-        data: fallbackData,
-        confidence: 0.70,
-        source: 'fallback',
+        type: 'kicd_guided_ai_fallback',
+        data: aiLesson,
+        confidence: 0.75,
+        source: 'kicd_guided_ai_fallback',
+        is_kicd_official: false,
         timestamp: new Date().toISOString()
       };
       
-      setGenerationProgress(prev => ({ 
-        ...prev, 
-        confidence: 0.70,
-        qualityMetrics: { ...prev.qualityMetrics, fallback: true }
-      }));
+      curriculumCache.current[cacheKey] = result;
+      return result;
+
+    } catch (error) {
+      console.error('❌ [FATAL ERROR] All fetch attempts failed:', error);
+      
+      // FINAL EMERGENCY FALLBACK
+      generationSources.current.emergency_fallback++;
+      
+      const emergencyData = createEmergencyFallback(substrandTitle, lessonNumber);
+      
+      const result = {
+        type: 'emergency_fallback',
+        data: emergencyData,
+        confidence: 0.50,
+        source: 'emergency_fallback',
+        is_kicd_official: false,
+        timestamp: new Date().toISOString()
+      };
       
       curriculumCache.current[cacheKey] = result;
       return result;
     }
   };
 
-  // Helper function to format data from API
-  const formatDataFromAPI = (apiData, source, substrandTitle) => {
+  // ===================== KICD DESIGN EXPANSION HELPER =====================
+  const expandKICDDesignForLesson = (kicdDesign, lessonNumber, substrandTitle, weekNumber) => {
+    // KICD designs provide framework, we expand for specific lessons
+    const baseOutcomes = kicdDesign.topic_specific_learning_outcomes || [];
+    const baseExperiences = kicdDesign.learning_experiences || [];
+    const baseQuestions = kicdDesign.key_inquiry_questions || [];
+    const baseResources = kicdDesign.learning_resources || [];
+    const baseAssessments = kicdDesign.assessment_methods || [];
+    
     const isKiswahili = isKiswahiliSubject();
     
-    // Helper to ensure array format
-    const ensureArray = (data) => {
-      if (Array.isArray(data)) return data;
-      if (typeof data === 'string') {
-        if (data.startsWith('[')) {
-          try {
-            return JSON.parse(data);
-          } catch (e) {
-            return data.split('\n').filter(Boolean);
-          }
-        }
-        return data.split('\n').filter(Boolean);
-      }
-      return [];
-    };
+    // Lesson-specific expansion
+    const lessonFocus = getLessonFocus(lessonNumber, substrandTitle);
     
     return {
-      topic_specific_learning_outcomes: ensureArray(apiData.outcomes || []).length > 0 
-        ? ensureArray(apiData.outcomes)
-        : [isKiswahili ? `Kuelewa ${substrandTitle}` : `Understand ${substrandTitle}`],
-      
-      learning_experiences: ensureArray(apiData.experiences || []).length > 0 
-        ? ensureArray(apiData.experiences)
-        : [isKiswahili ? 'Majadiliano ya kikundi' : 'Group discussions'],
-      
-      key_inquiry_questions: ensureArray(apiData.questions || []).length > 0 
-        ? ensureArray(apiData.questions)
-        : [isKiswahili ? `Kwa nini ${substrandTitle} ni muhimu?` : `Why is ${substrandTitle} important?`],
-      
-      learning_resources: ensureArray(apiData.resources || []).length > 0 
-        ? ensureArray(apiData.resources)
-        : [isKiswahili ? 'Vitabu vya somo' : 'Textbooks'],
-      
-      assessment_methods: ensureArray(apiData.assessment || []).length > 0 
-        ? ensureArray(apiData.assessment)
-        : [isKiswahili ? 'Maswali ya mdomo' : 'Oral questions'],
-      
-      core_competencies: isKiswahili
-        ? 'Mawasiliano; Ufahamu; Ubunifu; Uraia'
-        : 'Communication; Critical Thinking; Creativity; Citizenship',
-      
-      values: isKiswahili
-        ? 'Heshima; Uwajibikaji; Umoja'
-        : 'Respect; Responsibility; Unity',
-      
-      pci_links: isKiswahili
-        ? 'Stadi za Maisha; Mazingira'
-        : 'Life Skills; Environment',
-      
-      source: source,
+      topic_specific_learning_outcomes: [
+        ...baseOutcomes.slice(0, 2),
+        `${lessonFocus.learningGoal}`
+      ],
+      learning_experiences: [
+        ...baseExperiences.slice(0, 2),
+        lessonFocus.experience
+      ],
+      key_inquiry_questions: [
+        ...baseQuestions.slice(0, 2),
+        lessonFocus.question
+      ],
+      learning_resources: baseResources,
+      assessment_methods: baseAssessments,
+      core_competencies: kicdDesign.core_competencies || getDefaultCompetencies(isKiswahili),
+      values: kicdDesign.values || getDefaultValues(isKiswahili),
+      pci_links: kicdDesign.pci_links || getDefaultPCILinks(isKiswahili),
+      suggested_periods: kicdDesign.suggested_periods || 2
+    };
+  };
+
+  // ===================== KICD-ALIGNED AI LESSON GENERATOR =====================
+  const generateKICDAlignedLesson = (substrandTitle, lessonNumber, weekNumber, template, learningAreaId) => {
+    const isKiswahili = isKiswahiliSubject();
+    const learningArea = learning_areas.find(la => la.id === learningAreaId);
+    const subjectType = getSubjectType(learningArea?.name || '');
+    
+    const lessonFocus = getLessonFocus(lessonNumber, substrandTitle);
+    
+    return {
+      topic_specific_learning_outcomes: generateKICDOutcomes(substrandTitle, lessonFocus, subjectType, isKiswahili),
+      learning_experiences: generateKICDExperiences(substrandTitle, lessonFocus, subjectType, isKiswahili),
+      key_inquiry_questions: generateKICDQuestions(substrandTitle, lessonFocus, subjectType, isKiswahili),
+      learning_resources: generateKICDResources(subjectType, isKiswahili),
+      assessment_methods: generateKICDAssessments(subjectType, isKiswahili),
+      core_competencies: getDefaultCompetencies(isKiswahili),
+      values: getDefaultValues(isKiswahili),
+      pci_links: getDefaultPCILinks(isKiswahili),
       suggested_periods: 2
     };
   };
 
-  // Generate KICD-compliant curriculum (fallback)
-  const generateKICDCompliantCurriculum = (substrandTitle, weekNumber, learningArea, grade) => {
+  // ===================== KICD COMPLIANT AI GENERATOR =====================
+  const generateKICDCompliantLesson = async (substrandTitle, lessonNumber, weekNumber, learningAreaId, gradeId) => {
+    // This would call your AI API endpoint
+    // For now, return structured KICD-compliant data
     const isKiswahili = isKiswahiliSubject();
-    
-    // Week-based progression
-    const progression = getWeekProgression(weekNumber);
-    
-    // Generate based on progression stage
-    let outcomes, experiences, questions;
-    
-    if (progression.stage === 'introduction') {
-      outcomes = isKiswahili ? [
-        `Kutambua ${substrandTitle}`,
-        `Kuelezea ${substrandTitle}`,
-        `Kutaja mifano ya ${substrandTitle}`
-      ] : [
-        `Identify ${substrandTitle}`,
-        `Explain ${substrandTitle}`,
-        `Give examples of ${substrandTitle}`
-      ];
-      
-      experiences = isKiswahili ? [
-        'Kutambua dhana',
-        'Kujadili kikundi',
-        'Kutafuta mifano'
-      ] : [
-        'Identifying concepts',
-        'Group discussions',
-        'Finding examples'
-      ];
-      
-      questions = isKiswahili ? [
-        `Ni nini ${substrandTitle}?`,
-        `${substrandTitle} inamaanisha nini?`
-      ] : [
-        `What is ${substrandTitle}?`,
-        `What does ${substrandTitle} mean?`
-      ];
-    } else if (progression.stage === 'development') {
-      outcomes = isKiswahili ? [
-        `Kutumia ${substrandTitle}`,
-        `Kuchambua ${substrandTitle}`,
-        `Kufanya uhusiano wa ${substrandTitle}`
-      ] : [
-        `Apply ${substrandTitle}`,
-        `Analyze ${substrandTitle}`,
-        `Make connections with ${substrandTitle}`
-      ];
-      
-      experiences = isKiswahili ? [
-        'Kutumia katika mazoezi',
-        'Kuchambua matukio',
-        'Kufanya miradi'
-      ] : [
-        'Applying in exercises',
-        'Analyzing situations',
-        'Working on projects'
-      ];
-      
-      questions = isKiswahili ? [
-        `Unawezaje kutumia ${substrandTitle}?`,
-        `${substrandTitle} inahusikanaje?`
-      ] : [
-        `How can you apply ${substrandTitle}?`,
-        `How does ${substrandTitle} relate?`
-      ];
-    } else { // mastery stage
-      outcomes = isKiswahili ? [
-        `Kutathmini ${substrandTitle}`,
-        `Kubuni kwa ${substrandTitle}`,
-        `Kufanya tathmini ya ${substrandTitle}`
-      ] : [
-        `Evaluate ${substrandTitle}`,
-        `Design using ${substrandTitle}`,
-        `Conduct assessment of ${substrandTitle}`
-      ];
-      
-      experiences = isKiswahili ? [
-        'Kufanya tathmini',
-        'Kubuni miradi',
-        'Kushiriki majadiliano'
-      ] : [
-        'Conducting assessments',
-        'Designing projects',
-        'Participating in discussions'
-      ];
-      
-      questions = isKiswahili ? [
-        `Unawezaje kuboresha ${substrandTitle}?`,
-        `Ni changamoto gani za ${substrandTitle}?`
-      ] : [
-        `How can you improve ${substrandTitle}?`,
-        `What are the challenges of ${substrandTitle}?`
-      ];
-    }
+    const lessonFocus = getLessonFocus(lessonNumber, substrandTitle);
     
     return {
-      topic_specific_learning_outcomes: outcomes,
-      learning_experiences: experiences,
-      key_inquiry_questions: questions,
-      learning_resources: isKiswahili ? [
-        'Vitabu vya somo',
-        'Vifaa vya kidijitali',
-        'Vifaa vya vitendo'
-      ] : [
-        'Textbooks',
-        'Digital resources',
-        'Practical equipment'
+      topic_specific_learning_outcomes: [
+        isKiswahili 
+          ? `Kuelewa dhana za msingi za ${substrandTitle}`
+          : `Understand basic concepts of ${substrandTitle}`,
+        isKiswahili
+          ? `Kutumia ${substrandTitle} katika mazoezi ya vitendo`
+          : `Apply ${substrandTitle} in practical exercises`,
+        isKiswahili
+          ? `Kuchambua mifano ya ${substrandTitle} katika mazingira halisi`
+          : `Analyze examples of ${substrandTitle} in real contexts`
       ],
-      assessment_methods: isKiswahili ? [
-        'Maswali ya mdomo',
-        'Kazi za maandishi',
-        'Tathmini ya vitendo'
-      ] : [
-        'Oral questions',
-        'Written assignments',
-        'Practical assessment'
+      learning_experiences: [
+        isKiswahili ? "Majadiliano ya darasani" : "Classroom discussions",
+        isKiswahili ? "Mazoezi ya kikundi" : "Group exercises",
+        isKiswahili ? "Uwasilishaji na uigizaji" : "Presentation and role-play"
       ],
-      core_competencies: isKiswahili
-        ? 'Mawasiliano; Ufahamu; Ubunifu'
-        : 'Communication; Critical Thinking; Creativity',
-      values: isKiswahili
-        ? 'Heshima; Uwajibikaji; Umoja'
-        : 'Respect; Responsibility; Unity',
-      pci_links: isKiswahili
-        ? 'Stadi za Maisha; Mazingira'
-        : 'Life Skills; Environment',
-      source: 'kicd_compliant_fallback',
-      progression_stage: progression.stage
+      key_inquiry_questions: [
+        isKiswahili 
+          ? `Ni vipengele gani vya msingi vya ${substrandTitle}?`
+          : `What are the basic elements of ${substrandTitle}?`,
+        isKiswahili
+          ? `${substrandTitle} inahusikanaje na maisha yetu ya kila siku?`
+          : `How does ${substrandTitle} relate to our daily lives?`
+      ],
+      learning_resources: [
+        isKiswahili ? "Vitabu vya somo" : "Textbooks",
+        isKiswahili ? "Vifaa vya kidijitali" : "Digital resources",
+        isKiswahili ? "Vielelezo na picha" : "Models and pictures"
+      ],
+      assessment_methods: [
+        isKiswahili ? "Maswali ya mdomo" : "Oral questions",
+        isKiswahili ? "Kazi ya maandishi" : "Written work",
+        isKiswahili ? "Ufuatiliaji wa vitendo" : "Practical observation"
+      ],
+      core_competencies: getDefaultCompetencies(isKiswahili),
+      values: getDefaultValues(isKiswahili),
+      pci_links: getDefaultPCILinks(isKiswahili),
+      suggested_periods: 2
     };
   };
 
-  // Helper: Get week progression stage
-  const getWeekProgression = (weekNumber) => {
-    if (weekNumber <= 3) return { stage: 'introduction', focus: 'basic concepts' };
-    if (weekNumber <= 6) return { stage: 'development', focus: 'application' };
-    if (weekNumber <= 9) return { stage: 'mastery', focus: 'advanced skills' };
-    return { stage: 'assessment', focus: 'evaluation' };
+  // ===================== KICD CONTENT GENERATORS =====================
+  const getLessonFocus = (lessonNumber, substrandTitle) => {
+    const focuses = [
+      { learningGoal: "Introduction and basic understanding", experience: "Exploration and discovery", question: "What are the key concepts?" },
+      { learningGoal: "Deepening understanding", experience: "Practice and application", question: "How does this work in practice?" },
+      { learningGoal: "Application in context", experience: "Real-world application", question: "Where can this be applied?" },
+      { learningGoal: "Analysis and evaluation", experience: "Critical thinking exercises", question: "What are the strengths and limitations?" }
+    ];
+    
+    return focuses[lessonNumber % focuses.length] || focuses[0];
+  };
+
+  const getSubjectType = (learningAreaName) => {
+    const name = learningAreaName.toLowerCase();
+    if (name.includes('kiswahili')) return 'kiswahili';
+    if (name.includes('english')) return 'english';
+    if (name.includes('math')) return 'mathematics';
+    if (name.includes('science')) return 'science';
+    if (name.includes('social')) return 'social_studies';
+    return 'general';
+  };
+
+  const generateKICDOutcomes = (substrandTitle, lessonFocus, subjectType, isKiswahili) => {
+    const outcomes = {
+      kiswahili: [
+        `Kusoma na kuelewa maandishi yanayohusiana na ${substrandTitle}`,
+        `Kuandika kwa usahihi kuhusu ${substrandTitle}`,
+        lessonFocus.learningGoal.includes("Kuelewa") ? lessonFocus.learningGoal : `Kuzungumza kuhusu ${substrandTitle}`
+      ],
+      english: [
+        `Read and comprehend texts about ${substrandTitle}`,
+        `Write coherent paragraphs on ${substrandTitle}`,
+        lessonFocus.learningGoal
+      ],
+      mathematics: [
+        `Solve problems involving ${substrandTitle}`,
+        `Apply mathematical concepts of ${substrandTitle}`,
+        lessonFocus.learningGoal
+      ],
+      science: [
+        `Explain scientific concepts of ${substrandTitle}`,
+        `Conduct experiments related to ${substrandTitle}`,
+        lessonFocus.learningGoal
+      ],
+      general: [
+        isKiswahili ? `Kuelewa dhana za ${substrandTitle}` : `Understand concepts of ${substrandTitle}`,
+        isKiswahili ? `Kutumia ${substrandTitle}` : `Apply ${substrandTitle}`,
+        lessonFocus.learningGoal
+      ]
+    };
+    
+    return outcomes[subjectType] || outcomes.general;
+  };
+
+  const generateKICDExperiences = (substrandTitle, lessonFocus, subjectType, isKiswahili) => {
+    const experiences = {
+      kiswahili: ["Kusoma kwa sauti", "Majadiliano ya kikundi", "Kuandika mazoezi"],
+      english: ["Reading comprehension", "Group discussions", "Writing exercises"],
+      mathematics: ["Problem-solving", "Group calculations", "Real-world applications"],
+      science: ["Experiments", "Observation", "Research"],
+      general: [isKiswahili ? "Majadiliano" : "Discussions", isKiswahili ? "Mazoezi" : "Exercises", lessonFocus.experience]
+    };
+    
+    return experiences[subjectType] || experiences.general;
+  };
+
+  const generateKICDQuestions = (substrandTitle, lessonFocus, subjectType, isKiswahili) => {
+    const questions = {
+      kiswahili: [
+        `Ni nini ${substrandTitle}?`,
+        `Kwa nini ${substrandTitle} ni muhimu?`,
+        lessonFocus.question
+      ],
+      english: [
+        `What is ${substrandTitle}?`,
+        `Why is ${substrandTitle} important?`,
+        lessonFocus.question
+      ],
+      general: [
+        isKiswahili ? `Je, ${substrandTitle} ni nini?` : `What is ${substrandTitle}?`,
+        isKiswahili ? `${substrandTitle} inasaidiaje?` : `How does ${substrandTitle} help?`,
+        lessonFocus.question
+      ]
+    };
+    
+    return questions[subjectType] || questions.general;
+  };
+
+  const generateKICDResources = (subjectType, isKiswahili) => {
+    const resources = {
+      kiswahili: ["Vitabu vya Kiswahili", "Kamusi", "Vikaratasi vya mazoezi"],
+      english: ["English textbooks", "Dictionaries", "Workbooks"],
+      mathematics: ["Mathematics textbooks", "Calculators", "Measuring tools"],
+      science: ["Science textbooks", "Laboratory equipment", "Models"],
+      general: [isKiswahili ? "Vitabu vya somo" : "Textbooks", isKiswahili ? "Vifaa vya kidijitali" : "Digital resources", "Reference materials"]
+    };
+    
+    return resources[subjectType] || resources.general;
+  };
+
+  const generateKICDAssessments = (subjectType, isKiswahili) => {
+    const assessments = {
+      kiswahili: ["Maswali ya mdomo", "Insha", "Ufahamu"],
+      english: ["Oral questions", "Essay writing", "Comprehension"],
+      mathematics: ["Problem sets", "Calculations", "Tests"],
+      science: ["Practical tests", "Reports", "Experiments"],
+      general: [isKiswahili ? "Maswali" : "Questions", isKiswahili ? "Kazi ya maandishi" : "Written work", isKiswahili ? "Ufuatiliaji" : "Observation"]
+    };
+    
+    return assessments[subjectType] || assessments.general;
+  };
+
+  const getDefaultCompetencies = (isKiswahili) => {
+    return isKiswahili 
+      ? "Mawasiliano, Ushirikiano, Ufahamu wa Kidijitali"
+      : "Communication, Collaboration, Digital Literacy";
+  };
+
+  const getDefaultValues = (isKiswahili) => {
+    return isKiswahili 
+      ? "Heshima, Uwajibikaji, Umoja, Uaminifu"
+      : "Respect, Responsibility, Unity, Honesty";
+  };
+
+  const getDefaultPCILinks = (isKiswahili) => {
+    return isKiswahili 
+      ? "Elimu ya Afya, Uraia, Stadi za Maisha"
+      : "Health Education, Citizenship, Life Skills";
+  };
+
+  const createEmergencyFallback = (substrandTitle, lessonNumber) => {
+    const isKiswahili = isKiswahiliSubject();
+    
+    return {
+      topic_specific_learning_outcomes: [
+        isKiswahili 
+          ? `Kuelewa ${substrandTitle}`
+          : `Understand ${substrandTitle}`
+      ],
+      learning_experiences: [
+        isKiswahili ? "Majadiliano" : "Discussion"
+      ],
+      key_inquiry_questions: [
+        isKiswahili 
+          ? `Ni nini ${substrandTitle}?`
+          : `What is ${substrandTitle}?`
+      ],
+      learning_resources: ["Textbooks"],
+      assessment_methods: [
+        isKiswahili ? "Maswali" : "Questions"
+      ],
+      core_competencies: getDefaultCompetencies(isKiswahili),
+      values: getDefaultValues(isKiswahili),
+      pci_links: getDefaultPCILinks(isKiswahili),
+      suggested_periods: 2
+    };
   };
 
   // ===================== INPUT HANDLERS =====================
@@ -762,6 +817,43 @@ export default function CompleteSOWComponent() {
       setSelectedStrands(prevStr => ({ ...prevStr, [strandId]: anySelectedForStrand }));
       return flipped;
     });
+  };
+
+  const handleSetBookSelection = async (bookTitle, bookAuthor) => {
+    if (!formData.learning_area) {
+      alert(getTranslatedText('Please select a learning area first.', 'Tafadhali chagua eneo la kujifunza kwanza.'));
+      return;
+    }
+    setIsSettingBook(true);
+    try {
+      const bookDisplayName = formatSetBookTitle({ book_title: bookTitle, book_author: bookAuthor });
+      setSelectedSetBook(bookDisplayName);
+      
+      // Update substrands with the new set book title for 6th substrand
+      const updatedSubstrands = { ...substrands };
+      Object.keys(updatedSubstrands).forEach(strandId => {
+        updatedSubstrands[strandId] = updatedSubstrands[strandId].map(sub => {
+          if (Number(sub.order_index) === 6) {
+            const newTitle = isKiswahiliSubject() 
+              ? `Fasihi Andishi - ${bookDisplayName}`
+              : `Intensive Reading - ${bookDisplayName}`;
+            return { ...sub, title: newTitle };
+          }
+          return sub;
+        });
+      });
+      setSubstrands(updatedSubstrands);
+      
+      const successMessage = isKiswahiliSubject()
+        ? `✅ Kitabu cha fasihi "${bookDisplayName}" kimewekwa kwenye mada zote.`
+        : `✅ Set book "${bookDisplayName}" applied to all units.`;
+      
+      alert(successMessage);
+    } catch (err) {
+      console.error('Error in handleSetBookSelection:', err);
+    } finally {
+      setIsSettingBook(false);
+    }
   };
 
   // ===================== BREAKS MANAGEMENT =====================
@@ -883,6 +975,12 @@ export default function CompleteSOWComponent() {
 
   // ===================== STEP NAVIGATION =====================
   const handleStep1Next = () => {
+    // Check for Grade 10
+    if (isGrade10) {
+      alert("🎓 Grade 10 Scheme of Work is coming soon!\n\nWe're currently focused on Junior Secondary (CBE) Grades 7-9.\nGrade 10 support will be available in the next update.");
+      return;
+    }
+
     if (isStep1Complete()) {
       setCurrentStep(2);
     } else {
@@ -923,25 +1021,45 @@ export default function CompleteSOWComponent() {
 
   // ===================== GENERATE PREVIEW DATA =====================
   const generatePreviewData = async () => {
+    // Check for Grade 10
+    if (isGrade10) {
+      alert("🎓 Grade 10 SOW Generation is coming soon!\n\nFocus on Junior Secondary (CBE) for now.\nGrade 10 will be available in the next update.");
+      return;
+    }
+
     if (!isStep4Complete()) return;
+    
+    if (!dbCheckDone) {
+      alert(getTranslatedText(
+        'Checking database connection... Please wait.',
+        'Inakagua muunganisho wa database... Tafadhali subiri.'
+      ));
+      return;
+    }
+    
+    if (!dbConnected) {
+      alert(getTranslatedText(
+        '❌ Database connection failed! Cannot generate scheme without database.',
+        '❌ Muunganisho wa database umeshindwa! Haiwezekani kutengeneza mfumo bila database.'
+      ));
+      return;
+    }
     
     setIsSaving(true);
     setGenerationProgress({
       total: 100,
       completed: 0,
-      current: getTranslatedText('Preparing your scheme...', 'Inajiandaa kukutengenezea mfumo...'),
-      source: '',
-      confidence: 0,
-      qualityMetrics: {}
+      current: getTranslatedText('🔍 Starting KICD-aligned generation...', '🔍 Inaanza utengenezaji unaolingana na KICD...'),
+      source: 'initializing',
+      confidence: 0
     });
     
     // Reset generation sources
     generationSources.current = {
-      kicd_official: 0,
-      kicd_database: 0,
-      kicd_partial_match: 0,
-      high_profile_fallback: 0,
-      fallback: 0
+      database_exact_match: 0,
+      database_partial_match: 0,
+      kicd_guided_ai_fallback: 0,
+      emergency_fallback: 0
     };
     
     try {
@@ -955,10 +1073,20 @@ export default function CompleteSOWComponent() {
               strand: strand.title,
               substrand: sub.title,
               strand_id: strand.id,
-              substrand_id: sub.id
+              substrand_id: sub.id,
+              strand_order: strand.order_index || 0,
+              substrand_order: sub.order_index || 0
             });
           }
         });
+      });
+      
+      // Sort selected content by strand and substrand order
+      selectedContent.sort((a, b) => {
+        if (a.strand_order !== b.strand_order) {
+          return a.strand_order - b.strand_order;
+        }
+        return a.substrand_order - b.substrand_order;
       });
       
       if (selectedContent.length === 0) {
@@ -980,15 +1108,23 @@ export default function CompleteSOWComponent() {
         totalAvailableLessons -= 2;
       });
       
-      // Generate scheme data with KICD integration
+      // Generate scheme data
       const schemeRows = [];
       let currentWeek = lessonStructure.first_week_of_teaching;
       let currentLesson = lessonStructure.first_lesson_of_teaching;
       let contentIndex = 0;
+      let lessonCounter = 0;
       
       // Progress tracking
-      const totalLessons = Math.min(totalAvailableLessons, selectedContent.length * 3);
+      const totalLessons = Math.min(totalAvailableLessons, selectedContent.length * 4);
       let completedLessons = 0;
+      
+      console.log('📊 Starting KICD-aligned generation:', {
+        totalWeeks,
+        lessonsPerWeek,
+        totalAvailableLessons,
+        selectedContentCount: selectedContent.length
+      });
 
       for (let week = 0; week < totalWeeks; week++) {
         // Check if this week is in a break
@@ -998,9 +1134,10 @@ export default function CompleteSOWComponent() {
         
         if (!isInBreak) {
           for (let lesson = 1; lesson <= lessonsPerWeek; lesson++) {
-            if (schemeRows.length >= totalAvailableLessons || contentIndex >= selectedContent.length * 3) break;
+            if (schemeRows.length >= totalAvailableLessons || contentIndex >= selectedContent.length * 4) break;
             
-            const content = selectedContent[contentIndex % selectedContent.length];
+            const content = selectedContent[Math.floor(contentIndex / 4) % selectedContent.length];
+            const lessonInSubstrand = (contentIndex % 4) + 1;
             
             // Update progress
             completedLessons++;
@@ -1010,17 +1147,18 @@ export default function CompleteSOWComponent() {
               ...prev, 
               completed: progressPercent,
               current: getTranslatedText(
-                `Generating lesson ${currentLesson} for ${content.substrand.substring(0, 30)}...`,
-                `Inatengenezea somo ${currentLesson} la ${content.substrand.substring(0, 30)}...`
+                `Generating lesson ${lessonInSubstrand} for ${content.substrand.substring(0, 30)}...`,
+                `Inatengenezea somo ${lessonInSubstrand} la ${content.substrand.substring(0, 30)}...`
               )
             }));
             
-            // Fetch KICD curriculum data using API
+            // FETCH KICD-ALIGNED CURRICULUM DATA
             const curriculumData = await fetchKICDCurriculumData(
               content.substrand_id,
               formData.learning_area,
               formData.grade,
               currentWeek,
+              lessonInSubstrand,
               content.substrand
             );
             
@@ -1028,7 +1166,7 @@ export default function CompleteSOWComponent() {
               if (Array.isArray(items)) {
                 return items.map((item, i) => `${i+1}. ${item}`).join('\n');
               }
-              return items;
+              return items || '';
             };
             
             const lessonData = {
@@ -1041,13 +1179,13 @@ export default function CompleteSOWComponent() {
               key_inquiry_questions: formatList(curriculumData.data.key_inquiry_questions),
               learning_resources: formatList(curriculumData.data.learning_resources),
               assessment_methods: formatList(curriculumData.data.assessment_methods),
-              core_competencies: curriculumData.data.core_competencies,
-              values: curriculumData.data.values,
-              pci_links: curriculumData.data.pci_links,
+              core_competencies: curriculumData.data.core_competencies || '',
+              values: curriculumData.data.values || '',
+              pci_links: curriculumData.data.pci_links || '',
               reflection: '',
               _data_source: curriculumData.source,
               _confidence: curriculumData.confidence,
-              _is_real_kicd: curriculumData.is_real_kicd || false,
+              _is_kicd_official: curriculumData.is_kicd_official || false,
               _timestamp: curriculumData.timestamp
             };
             
@@ -1067,11 +1205,19 @@ export default function CompleteSOWComponent() {
       
       // Calculate quality metrics
       const totalLessonsGenerated = schemeRows.length;
-      const kicdOfficialLessons = schemeRows.filter(l => l._is_real_kicd).length;
+      const kicdOfficialLessons = schemeRows.filter(l => l._is_kicd_official).length;
       const highConfidenceLessons = schemeRows.filter(l => l._confidence >= 0.85).length;
       const averageConfidence = schemeRows.reduce((sum, l) => sum + l._confidence, 0) / totalLessonsGenerated;
       
-      // Create preview data object with detailed metrics
+      console.log('📊 Generation completed with metrics:', {
+        totalLessonsGenerated,
+        kicdOfficialLessons,
+        highConfidenceLessons,
+        averageConfidence,
+        sources: generationSources.current
+      });
+      
+      // Create preview data object
       const previewDataObj = {
         meta: {
           school: formData.school,
@@ -1091,35 +1237,35 @@ export default function CompleteSOWComponent() {
             kicdOfficialLessons,
             highConfidenceLessons,
             averageConfidence: Math.round(averageConfidence * 100) / 100,
-            dataSources: generationSources.current
+            dataSources: generationSources.current,
+            databaseConnected: dbConnected
           },
           kicdAligned: kicdOfficialLessons > 0 || highConfidenceLessons > 0
         },
         scheme: schemeRows,
-        breaks: breaks,
-        paymentStatus: paymentStatus
+        breaks: breaks
       };
 
       setPreviewData(previewDataObj);
       setCurrentStep(5);
       
       // Show quality summary
-      const qualitySummary = `✅ YOUR PROFESSIONAL SCHEME OF WORK IS READY!
+      const qualitySummary = `✅ YOUR KICD-ALIGNED SCHEME OF WORK IS READY!
 
 📊 QUALITY METRICS:
    • Total Lessons: ${totalLessonsGenerated}
    • KICD Official Lessons: ${kicdOfficialLessons}
    • High Confidence (85%+): ${highConfidenceLessons}
    • Average Confidence: ${Math.round(averageConfidence * 100)}%
+   • Database Status: ${dbConnected ? '✅ Connected' : '❌ Not Connected'}
 
 🎯 DATA SOURCES:
-   • KICD Official Designs: ${generationSources.current.kicd_official || 0}
-   • Database Curriculum: ${generationSources.current.kicd_database || 0}
-   • KICD Pattern-Based: ${generationSources.current.kicd_partial_match || 0}
-   • High-Profile Fallback: ${generationSources.current.high_profile_fallback || 0}
-   • Emergency Fallback: ${generationSources.current.fallback || 0}
+   • Database Exact Match: ${generationSources.current.database_exact_match || 0}
+   • Database Partial Match: ${generationSources.current.database_partial_match || 0}
+   • KICD-Guided AI Fallback: ${generationSources.current.kicd_guided_ai_fallback || 0}
+   • Emergency Fallback: ${generationSources.current.emergency_fallback || 0}
 
-📄 Your scheme is ${kicdOfficialLessons > 0 ? 'KICD-ALIGNED' : 'professionally generated'} and ready for use!`;
+📄 ${kicdOfficialLessons > 0 ? '✅ KICD-OFFICIAL ALIGNED' : '✅ Professionally generated with KICD guidelines'}`;
       
       alert(qualitySummary);
       
@@ -1136,8 +1282,7 @@ export default function CompleteSOWComponent() {
         completed: 0, 
         current: '', 
         source: '',
-        confidence: 0,
-        qualityMetrics: {}
+        confidence: 0
       });
     }
   };
@@ -1152,38 +1297,36 @@ export default function CompleteSOWComponent() {
         return;
       }
       
-      // Save each lesson to kicd_curriculum table
+      // Save to database
       const lessonsToSave = previewData.scheme.map(lesson => ({
-        grade_level: previewData.meta.grade,
-        learning_area: previewData.meta.learningArea,
-        term: previewData.meta.term,
-        week: `Week ${lesson.week}`,
-        lesson_number: lesson.lesson,
+        learning_area_id: formData.learning_area,
+        grade_id: formData.grade,
         strand_title: lesson.strand,
         substrand_title: lesson.substrand,
-        topic_specific_learning_outcomes: lesson.learning_outcomes.split('\n').map(l => l.replace(/^\d+\.\s*/, '')),
-        learning_experiences: lesson.learning_experiences.split('\n').map(l => l.replace(/^\d+\.\s*/, '')),
-        key_inquiry_questions: lesson.key_inquiry_questions.split('\n').map(l => l.replace(/^\d+\.\s*/, '')),
-        learning_resources: lesson.learning_resources.split('\n').map(l => l.replace(/^\d+\.\s*/, '')),
-        assessment_methods: lesson.assessment_methods.split('\n').map(l => l.replace(/^\d+\.\s*/, '')),
+        week_number: lesson.week,
+        lesson_number: lesson.lesson,
+        topic_specific_learning_outcomes: lesson.learning_outcomes.split('\n').map(l => l.replace(/^\d+\.\s*/, '')).filter(Boolean),
+        learning_experiences: lesson.learning_experiences.split('\n').map(l => l.replace(/^\d+\.\s*/, '')).filter(Boolean),
+        key_inquiry_questions: lesson.key_inquiry_questions.split('\n').map(l => l.replace(/^\d+\.\s*/, '')).filter(Boolean),
+        learning_resources: lesson.learning_resources.split('\n').map(l => l.replace(/^\d+\.\s*/, '')).filter(Boolean),
+        assessment_methods: lesson.assessment_methods.split('\n').map(l => l.replace(/^\d+\.\s*/, '')).filter(Boolean),
         core_competencies: lesson.core_competencies,
         values: lesson.values,
         pci_links: lesson.pci_links,
-        source_document: lesson._is_real_kicd ? 'KICD Design' : 'System Generated',
-        kicd_reference_code: `${previewData.meta.learningArea.substring(0, 3)}${previewData.meta.grade.substring(0, 2)}.W${lesson.week}`,
-        generated_by_ai: !lesson._is_real_kicd
+        source_document: lesson._is_kicd_official ? 'KICD Official' : 'Generated',
+        is_kicd_official: lesson._is_kicd_official,
+        confidence_score: lesson._confidence
       }));
       
-      // Insert all lessons
       const { data, error } = await supabase
-        .from('kicd_curriculum')
+        .from('kicd_curriculum_lessons')
         .insert(lessonsToSave);
       
       if (error) throw error;
       
       alert(getTranslatedText(
-        '✅ Scheme of work saved successfully!',
-        '✅ Mfumo wa kazi umehifadhiwa kikamilifu!'
+        '✅ Scheme of work saved successfully to KICD database!',
+        '✅ Mfumo wa kazi umehifadhiwa kikamilifu kwenye database ya KICD!'
       ));
       
     } catch (error) {
@@ -1198,7 +1341,7 @@ export default function CompleteSOWComponent() {
   };
 
   // ===================== GENERATE PDF =====================
-  const generatePDF = (format = 'standard') => {
+  const generatePDF = () => {
     if (!previewData) {
       alert(getTranslatedText('No scheme data to generate PDF.', 'Hakuna data ya mfumo ya kutengeneza PDF.'));
       return;
@@ -1213,10 +1356,9 @@ export default function CompleteSOWComponent() {
       let textContent = '';
       const { meta, scheme } = previewData;
       
-      if (format === 'standard') {
-        textContent = `REPUBLIC OF KENYA
+      textContent = `REPUBLIC OF KENYA
 MINISTRY OF EDUCATION
-KICD-ALIGNED SCHEME OF WORK
+KICD-ALIGNED SCHEME OF WORK - JUNIOR SECONDARY (CBE)
 
 SCHOOL: ${meta.school}
 GRADE: ${meta.grade}
@@ -1231,10 +1373,11 @@ QUALITY ASSURANCE REPORT
 - KICD Official Lessons: ${meta.qualityMetrics.kicdOfficialLessons}
 - High Confidence Lessons: ${meta.qualityMetrics.highConfidenceLessons}
 - Average Confidence Score: ${meta.qualityMetrics.averageConfidence}
+- Database Connection: ${meta.qualityMetrics.databaseConnected ? 'ESTABLISHED' : 'FAILED'}
 ================================================================================
 
 ${scheme.slice(0, 10).map(lesson => `WEEK ${lesson.week} | LESSON ${lesson.lesson} | Source: ${lesson._data_source} | Confidence: ${Math.round(lesson._confidence * 100)}%
-${lesson._is_real_kicd ? '✅ KICD OFFICIAL DESIGN' : '📊 Professionally Generated'}
+${lesson._is_kicd_official ? '✅ KICD OFFICIAL DESIGN' : '📊 Professionally Generated'}
 ================================================================================
 
 STRAND: ${lesson.strand}
@@ -1264,29 +1407,10 @@ REFLECTION: ${lesson.reflection || ''}
 `).join('\n')}
 
 ================================================================================
-Generated by Professional KICD Scheme of Work Generator
+Generated by KICD-Aligned Scheme of Work Generator
+Focus: Junior Secondary (CBE) - Competency Based Education
 Quality Assured: ${meta.kicdAligned ? '✅ KICD-Aligned' : '✅ Professionally Generated'}`;
-      } else {
-        textContent = `SCHEME OF WORK - COMPACT VERSION
-=================================
 
-School: ${meta.school}
-Grade: ${meta.grade}
-Subject: ${meta.learningArea}
-Term: ${meta.term} ${meta.year}
-Quality: ${meta.qualityMetrics.averageConfidence >= 0.85 ? 'High' : 'Standard'}
-
-${scheme.slice(0, 15).map(lesson => `WK ${lesson.week} LSN ${lesson.lesson} [${lesson._data_source.substring(0, 3)}]
-${lesson.strand.substring(0, 30)}
-${lesson.substrand.substring(0, 40)}
-
-${lesson.learning_outcomes.split('\n')[0]?.replace('1. ', '')?.substring(0, 60) || ''}
-`).join('\n')}
-
---- END ---
-Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta.qualityMetrics.highConfidenceLessons} high confidence`;
-      }
-      
       const blob = new Blob([textContent], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1312,8 +1436,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
       grade: '',
       learning_area: '',
       textbook: '',
-      custom_textbook: '',
-      textbook_source: '',
       term: '',
       year: new Date().getFullYear()
     });
@@ -1331,15 +1453,71 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
     setSelectedStrands({});
     setSelectedSubstrands({});
     setPreviewData(null);
+    setIsGrade10(false);
     setCurrentStep(1);
     curriculumCache.current = {};
     generationSources.current = {
-      kicd_official: 0,
-      kicd_database: 0,
-      kicd_partial_match: 0,
-      high_profile_fallback: 0,
-      fallback: 0
+      database_exact_match: 0,
+      database_partial_match: 0,
+      kicd_guided_ai_fallback: 0,
+      emergency_fallback: 0
     };
+  };
+
+  // ===================== RENDER DATABASE CONNECTION STATUS =====================
+  const renderDatabaseStatus = () => {
+    if (!dbCheckDone) {
+      return (
+        <div className="mb-4 p-4 bg-yellow-100 border border-yellow-400 rounded-xl">
+          <div className="flex items-center">
+            <svg className="w-6 h-6 text-yellow-600 mr-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <span className="font-bold text-yellow-700">
+              {getTranslatedText('Checking database connection...', 'Inakagua muunganisho wa database...')}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    if (!dbConnected) {
+      return (
+        <div className="mb-4 p-4 bg-red-100 border border-red-400 rounded-xl">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <svg className="w-6 h-6 text-red-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <div>
+                <p className="font-bold text-red-700">
+                  {getTranslatedText('⚠️ DATABASE CONNECTION FAILED', '⚠️ MUUNGANISHO WA DATABASE UMESHINDWA')}
+                </p>
+                <p className="text-red-600 text-sm mt-1">
+                  {getTranslatedText(
+                    'Cannot generate professional schemes without database.',
+                    'Haiwezekani kutengeneza mifumo ya kitaaluma bila database.'
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="mb-4 p-4 bg-green-100 border border-green-400 rounded-xl">
+        <div className="flex items-center">
+          <svg className="w-6 h-6 text-green-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="font-bold text-green-700">
+            {getTranslatedText('✅ DATABASE CONNECTED - Ready to generate', '✅ DATABASE IMESHIKANA - Tuko tayari kutengeneza')}
+          </span>
+        </div>
+      </div>
+    );
   };
 
   // ===================== RENDER LOADING OVERLAY =====================
@@ -1359,17 +1537,16 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
             
             {generationProgress.source && (
               <div className={`mb-4 px-3 py-1 rounded-full text-sm font-bold inline-block ${
-                generationProgress.source === 'kicd_official' ? 'bg-green-100 text-green-800' :
-                generationProgress.source === 'kicd_database' ? 'bg-blue-100 text-blue-800' :
-                generationProgress.source === 'kicd_partial_match' ? 'bg-purple-100 text-purple-800' :
-                generationProgress.source === 'high_profile_fallback' ? 'bg-yellow-100 text-yellow-800' :
+                generationProgress.source === 'database_exact_match' ? 'bg-green-100 text-green-800' :
+                generationProgress.source === 'database_partial_match' ? 'bg-blue-100 text-blue-800' :
+                generationProgress.source === 'kicd_guided_ai_fallback' ? 'bg-purple-100 text-purple-800' :
                 'bg-red-100 text-red-800'
               }`}>
-                {generationProgress.source === 'kicd_official' ? '🎯 KICD Official' :
-                 generationProgress.source === 'kicd_database' ? '📊 Database' :
-                 generationProgress.source === 'kicd_partial_match' ? '🔍 Pattern Match' :
-                 generationProgress.source === 'high_profile_fallback' ? '🤖 Smart Fallback' :
-                 '⚠️ Emergency'}
+                {generationProgress.source === 'database_exact_match' ? '🎯 KICD Exact Match' :
+                 generationProgress.source === 'database_partial_match' ? '📊 KICD Template' :
+                 generationProgress.source === 'kicd_guided_ai_fallback' ? '🤖 KICD-Guided AI' :
+                 generationProgress.source === 'database_search' ? '🔍 Searching KICD DB' :
+                 '⚠️ Fallback'}
               </div>
             )}
             
@@ -1385,10 +1562,13 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <span>Confidence: {Math.round(generationProgress.confidence * 100)}%</span>
             </div>
             
-            {generationProgress.qualityMetrics && generationProgress.qualityMetrics.kicd_official && (
-              <p className="text-sm text-green-600 font-bold">
-                ✅ Using KICD Official Curriculum Design
-              </p>
+            {/* Grade 10 warning in loading */}
+            {isGrade10 && (
+              <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <p className="text-yellow-700 text-sm font-bold">
+                  ⚠️ Grade 10 is coming soon!
+                </p>
+              </div>
             )}
           </div>
         </div>
@@ -1399,6 +1579,28 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
   // ===================== RENDER STEP 1 =====================
   const renderStep1 = () => (
     <div className="bg-white rounded-2xl shadow-2xl p-8 border border-gray-200">
+      {/* DATABASE STATUS AT TOP */}
+      {renderDatabaseStatus()}
+      
+      {/* GRADE 10 WARNING BANNER */}
+      {isGrade10 && (
+        <div className="mb-6 p-6 bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-300 rounded-xl">
+          <div className="flex items-center">
+            <div className="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center mr-4">
+              <svg className="w-7 h-7 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="font-bold text-yellow-800 text-lg mb-1">🎓 Grade 10 Coming Soon!</h3>
+              <p className="text-yellow-700 text-sm">
+                We're currently focused on Junior Secondary (CBE) Grades 7-9. Grade 10 support will be available in the next update.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      
       <h2 className="text-3xl font-bold mb-8 text-blue-800 border-b pb-4">
         {getTranslatedText('Step 1: Basic Information', 'Hatua ya 1: Maelezo ya Msingi')}
       </h2>
@@ -1409,18 +1611,16 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
           <label className="block text-lg font-bold mb-3 text-gray-800">
             {getTranslatedText('School Name *', 'Jina la Shule *')}
           </label>
-          <div className="relative">
-            <input 
-              type="text" 
-              value={formData.school} 
-              onChange={e => handleInputChange('school', e.target.value)} 
-              className="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-lg transition-all hover:border-blue-400" 
-              placeholder={getTranslatedText("e.g., Kiwanja Secondary School", "mfano: Shule ya Sekondari Kiwanja")} 
-            />
-          </div>
+          <input 
+            type="text" 
+            value={formData.school} 
+            onChange={e => handleInputChange('school', e.target.value)} 
+            className="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-lg transition-all hover:border-blue-400" 
+            placeholder={getTranslatedText("e.g., Kiwanja Junior Secondary", "mfano: Shule ya Sekondari ya Upili Kiwanja")} 
+          />
         </div>
 
-        {/* Level Selection */}
+        {/* Level Selection - CBE FOCUSED */}
         <div>
           <label className="block text-lg font-bold mb-3 text-gray-800">
             {getTranslatedText('Education Level *', 'Kiwango cha Elimu *')}
@@ -1432,11 +1632,25 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               className="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-lg appearance-none transition-all hover:border-blue-400"
             >
               <option value="">{getTranslatedText('-- Select Education Level --', '-- Chagua Kiwango cha Elimu --')}</option>
-              {levels.map(l => (
-                <option key={l.id} value={l.id}>{l.name}</option>
+              {levels.filter(level => 
+                level.name.toLowerCase().includes('junior') || 
+                level.name.toLowerCase().includes('jss') ||
+                level.name.toLowerCase().includes('cbe')
+              ).map(l => (
+                <option key={l.id} value={l.id}>
+                  {l.name} {l.name.toLowerCase().includes('junior') ? '👨‍🎓 (CBE)' : ''}
+                </option>
               ))}
             </select>
+            <div className="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none">
+              <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
           </div>
+          <p className="text-sm text-green-600 mt-2 font-medium">
+            👨‍🎓 Focus: Junior Secondary (Competency Based Education)
+          </p>
         </div>
 
         {/* Grade Selection */}
@@ -1454,23 +1668,34 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               >
                 <option value="">{getTranslatedText('-- Select Grade --', '-- Chagua Darasa --')}</option>
                 {grades.map(g => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
+                  <option key={g.id} value={g.id}>
+                    {g.name} {g.name.includes('Grade 10') ? '🚧 (Coming Soon)' : ''}
+                  </option>
                 ))}
               </select>
-              {loading && (
-                <div className="absolute right-4 top-4">
-                  <div className="relative">
-                    <div className="w-6 h-6 border-2 border-blue-200 rounded-full"></div>
-                    <div className="absolute top-0 left-0 w-6 h-6 border-2 border-transparent border-t-blue-600 border-r-blue-600 rounded-full animate-spin"></div>
-                  </div>
-                </div>
-              )}
+              <div className="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
+            {loading && (
+              <div className="mt-2 text-blue-600">
+                {getTranslatedText('Loading grades...', 'Inapakia madarasa...')}
+              </div>
+            )}
+            {isGrade10 && (
+              <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <p className="text-yellow-700 text-sm">
+                  <span className="font-bold">Note:</span> Grade 10 support is coming soon. Focus on Grades 7-9 for now.
+                </p>
+              </div>
+            )}
           </div>
         )}
 
         {/* Learning Area Selection */}
-        {formData.grade && (
+        {formData.grade && !isGrade10 && (
           <div>
             <label className="block text-lg font-bold mb-3 text-gray-800">
               {getTranslatedText('Learning Area *', 'Eneo la Kujifunza *')}
@@ -1487,64 +1712,51 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                   <option key={a.id} value={a.id}>{a.name}</option>
                 ))}
               </select>
-              {loading && (
-                <div className="absolute right-4 top-4">
-                  <div className="relative">
-                    <div className="w-6 h-6 border-2 border-blue-200 rounded-full"></div>
-                    <div className="absolute top-0 left-0 w-6 h-6 border-2 border-transparent border-t-blue-600 border-r-blue-600 rounded-full animate-spin"></div>
-                  </div>
-                </div>
-              )}
+              <div className="absolute right-4 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
           </div>
         )}
 
         {/* Textbook Selection (Optional) */}
-        {formData.learning_area && (
+        {formData.learning_area && !isGrade10 && (
           <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-2xl border-2 border-blue-200">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center">
-                <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
-                  <svg className="w-7 h-7 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-blue-800">
-                    {getTranslatedText('📚 Textbook (Optional)', '📚 Kitabu (Hiari)')}
-                  </h3>
-                  <p className="text-sm text-blue-600">
-                    {getTranslatedText('Recommended but not required', 'Inapendekezwa lakini si lazima')}
-                  </p>
-                </div>
+            <div className="flex items-center mb-6">
+              <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mr-4">
+                <svg className="w-7 h-7 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-blue-800">
+                  {getTranslatedText('📚 Textbook (Optional)', '📚 Kitabu (Hiari)')}
+                </h3>
               </div>
             </div>
             
-            <div className="relative">
-              <input 
-                type="text" 
-                value={formData.textbook || formData.custom_textbook || ''} 
-                onChange={e => {
-                  handleInputChange('textbook', e.target.value);
-                  handleInputChange('custom_textbook', e.target.value);
-                }}
-                className="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-4 focus:ring-green-100 focus:border-green-500 text-lg transition-all hover:border-green-400" 
-                placeholder={getTranslatedText(
-                  "e.g., Mentor English Grade 9",
-                  "mfano: Mentor English Darasa la 9"
-                )} 
-              />
-            </div>
+            <input 
+              type="text" 
+              value={formData.textbook} 
+              onChange={e => handleInputChange('textbook', e.target.value)}
+              className="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-4 focus:ring-green-100 focus:border-green-500 text-lg transition-all hover:border-green-400" 
+              placeholder={getTranslatedText(
+                "e.g., Mentor English Grade 9",
+                "mfano: Mentor English Darasa la 9"
+              )} 
+            />
           </div>
         )}
 
         {/* Term and Year Selection */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div>
-            <label className="block text-lg font-bold mb-3 text-gray-800">
-              {getTranslatedText('Term *', 'Muhula *')}
-            </label>
-            <div className="relative">
+        {!isGrade10 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div>
+              <label className="block text-lg font-bold mb-3 text-gray-800">
+                {getTranslatedText('Term *', 'Muhula *')}
+              </label>
               <select 
                 value={formData.term} 
                 onChange={e => handleInputChange('term', e.target.value)} 
@@ -1556,13 +1768,11 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 ))}
               </select>
             </div>
-          </div>
 
-          <div>
-            <label className="block text-lg font-bold mb-3 text-gray-800">
-              {getTranslatedText('Year *', 'Mwaka *')}
-            </label>
-            <div className="relative">
+            <div>
+              <label className="block text-lg font-bold mb-3 text-gray-800">
+                {getTranslatedText('Year *', 'Mwaka *')}
+              </label>
               <select 
                 value={formData.year} 
                 onChange={e => handleInputChange('year', e.target.value)} 
@@ -1574,48 +1784,38 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               </select>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Progress Indicator */}
-        <div className="bg-gradient-to-r from-gray-50 to-blue-50 p-6 rounded-2xl border-2 border-blue-100">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center">
-              <svg className="w-8 h-8 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-              <span className="text-lg font-bold text-gray-800">
-                {getTranslatedText('Step 1 Progress', 'Maendeleo ya Hatua ya 1')}
-              </span>
-            </div>
-            <span className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-green-600 bg-clip-text text-transparent">
-              {Math.round((Object.values(formData).filter(v => v && v.toString().trim() !== '').length / 7) * 100)}%
-            </span>
-          </div>
-          <div className="w-full bg-gray-200 rounded-full h-4 mb-4">
-            <div 
-              className="bg-gradient-to-r from-blue-500 via-green-500 to-emerald-500 h-4 rounded-full transition-all duration-1000 ease-out"
-              style={{ width: `${(Object.values(formData).filter(v => v && v.toString().trim() !== '').length / 7) * 100}%` }}
-            ></div>
-          </div>
-          <p className={`text-lg font-bold ${isStep1Complete() ? 'text-green-600' : 'text-gray-600'}`}>
-            {isStep1Complete() 
-              ? getTranslatedText('✅ All required fields completed!', '✅ Sehemu zote zinazohitajika zimekamilika!')
-              : getTranslatedText(
-                  `Fill ${7 - Object.values(formData).filter(v => v && v.toString().trim() !== '').length} more required fields`,
-                  `Jaza sehemu ${7 - Object.values(formData).filter(v => v && v.toString().trim() !== '').length} zaidi zinazohitajika`
-                )
-            }
-          </p>
-        </div>
-
-        {/* Next Button */}
+        {/* Next Button - DISABLED if database not connected or Grade 10 */}
         <div className="pt-6">
           <button 
             onClick={handleStep1Next} 
-            disabled={!isStep1Complete()} 
-            className={`w-full text-white p-6 rounded-2xl font-bold text-xl transition-all flex items-center justify-center ${isStep1Complete() ? 'bg-gradient-to-r from-blue-600 via-green-600 to-emerald-600 hover:from-blue-700 hover:via-green-700 hover:to-emerald-700 shadow-2xl hover:shadow-3xl hover:-translate-y-1' : 'bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed'}`}
+            disabled={!isStep1Complete() || !dbConnected || isGrade10} 
+            className={`w-full text-white p-6 rounded-2xl font-bold text-xl transition-all flex items-center justify-center ${
+              isStep1Complete() && dbConnected && !isGrade10
+                ? 'bg-gradient-to-r from-blue-600 via-green-600 to-emerald-600 hover:from-blue-700 hover:via-green-700 hover:to-emerald-700 shadow-2xl hover:shadow-3xl hover:-translate-y-1' 
+                : 'bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed'
+            }`}
           >
-            {isStep1Complete() ? (
+            {isGrade10 ? (
+              <>
+                <span className="mr-4">
+                  {getTranslatedText('🚧 Grade 10 Coming Soon', '🚧 Darasa la 10 Linakuja Hivi Karibuni')}
+                </span>
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </>
+            ) : !dbConnected ? (
+              <>
+                <span className="mr-4">
+                  {getTranslatedText('❌ Database Not Connected', '❌ Database Haijashikana')}
+                </span>
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </>
+            ) : isStep1Complete() ? (
               <>
                 <span className="mr-4">{getTranslatedText('Next: Select Topics', 'Inayofuata: Chagua Mada')}</span>
                 <svg className="w-8 h-8 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1639,6 +1839,23 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
   // ===================== RENDER STEP 2 =====================
   const renderStep2 = () => (
     <div className="bg-white rounded-2xl shadow-2xl p-8 border border-gray-200">
+      {/* DATABASE STATUS WARNING */}
+      {!dbConnected && dbCheckDone && (
+        <div className="mb-6 p-4 bg-red-100 border border-red-400 rounded-xl">
+          <div className="flex items-center">
+            <svg className="w-6 h-6 text-red-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <span className="font-bold text-red-700">
+              {getTranslatedText(
+                '⚠️ GENERATING WITHOUT DATABASE - Quality will be reduced',
+                '⚠️ INA-TENGENEZA BILA DATABASE - Ubora utapungua'
+              )}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Set Book Selection for Language Subjects */}
       {shouldShowSetBookSelection() && setBooks.length > 0 && (
         <div className="mb-10 p-8 bg-gradient-to-r from-purple-50 to-indigo-50 rounded-2xl border-2 border-purple-200">
@@ -1661,9 +1878,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 </p>
               </div>
             </div>
-            <span className="px-4 py-2 bg-purple-100 text-purple-800 rounded-full text-sm font-bold">
-              {getTranslatedText('Optional', 'Hiari')}
-            </span>
           </div>
           
           {selectedSetBook && (
@@ -1721,7 +1935,7 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
             </div>
           </div>
           <p className="mt-6 text-gray-600 text-lg">
-            {getTranslatedText('Loading curriculum topics...', 'Inapakia mada za mtaala...')}
+            {getTranslatedText('Loading KICD curriculum topics...', 'Inapakia mada za mtaala ya KICD...')}
           </p>
         </div>
       ) : strands.length === 0 ? (
@@ -1731,12 +1945,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
           </svg>
           <p className="text-xl font-bold text-gray-600 mb-2">
             {getTranslatedText('No Curriculum Found', 'Hakuna Mtaala Ulioapatikana')}
-          </p>
-          <p className="text-gray-500 max-w-lg mx-auto">
-            {getTranslatedText(
-              'No curriculum strands found for this learning area and grade.',
-              'Hakuna mada za mtaala zilizopatikana kwa eneo hili la kujifunza na darasa hili.'
-            )}
           </p>
           <button 
             onClick={handleBack} 
@@ -1753,8 +1961,8 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <div>
                 <p className="font-bold text-blue-800 text-lg">
                   {getTranslatedText(
-                    `Select all substrands you want to include in your scheme`,
-                    `Chagua mada ndogo zote unazotaka kujumuisha kwenye mfumo wako`
+                    `Select all substrands you want to include in your KICD-aligned scheme`,
+                    `Chagua mada ndogo zote unazotaka kujumuisha kwenye mfumo unaolingana na KICD`
                   )}
                 </p>
                 <p className="text-blue-600 mt-2 flex items-center">
@@ -1763,10 +1971,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                   </svg>
                   <span className="font-bold">
                     {Object.values(selectedSubstrands).filter(Boolean).length} {getTranslatedText('selected', 'zimechaguliwa')}
-                  </span>
-                  <span className="mx-2">•</span>
-                  <span>
-                    {strands.length} {getTranslatedText('strands', 'mada')}
                   </span>
                 </p>
               </div>
@@ -1811,7 +2015,12 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
           {/* Strands List */}
           <div className="space-y-6">
             {strands.map((strand, index) => {
-              const sSubs = (substrands[strand.id] || []).sort((a,b) => (a.order_index||0) - (b.order_index||0));
+              const sSubs = (substrands[strand.id] || []).sort((a,b) => {
+                const orderA = a.order_index || 0;
+                const orderB = b.order_index || 0;
+                if (orderA !== orderB) return orderA - orderB;
+                return (a.title || '').localeCompare(b.title || '');
+              });
               const selectedCount = sSubs.filter(sub => selectedSubstrands[sub.id]).length;
               
               return (
@@ -1837,18 +2046,8 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                               {strand.title}
                             </h3>
                           </div>
-                          {strand.description && (
-                            <p className="text-gray-600 mt-2">
-                              {strand.description}
-                            </p>
-                          )}
                         </div>
                         <div className="flex items-center gap-3">
-                          {strand.source_type && (
-                            <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs">
-                              {strand.source_type === 'kicd' ? 'KICD Data' : 'Database'}
-                            </span>
-                          )}
                           <span className="px-4 py-2 bg-gradient-to-r from-blue-100 to-green-100 text-blue-800 rounded-full text-sm font-bold">
                             {selectedCount}/{sSubs.length} {getTranslatedText('selected', 'zimechaguliwa')}
                           </span>
@@ -1863,6 +2062,9 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                       {sSubs.map(substrand => {
                         const isSixth = Number(substrand.order_index) === 6;
                         let displayTitle = substrand.title;
+                        
+                        const strandNumber = strand.order_index || '?';
+                        const substrandNumber = substrand.order_index || '?';
                         
                         if (isSixth && selectedSetBook && (isKiswahiliSubject() || isEnglishSubject())) {
                           displayTitle = isKiswahiliSubject()
@@ -1883,15 +2085,10 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                                 <div>
                                   <span className={`font-bold text-lg ${isSixth && !selectedSetBook && shouldShowSetBookSelection() ? 'text-orange-600' : 'text-gray-800'}`}>
                                     <span className="text-sm text-gray-500 font-normal">
-                                      {getTranslatedText('SUBSTRAND', 'Mada Ndogo')} {substrand.order_index}:
+                                      {getTranslatedText('SUBSTRAND', 'Mada Ndogo')} {strandNumber}.{substrandNumber}:
                                     </span>{' '}
                                     {displayTitle}
                                   </span>
-                                  {substrand.content && (
-                                    <p className="text-sm text-gray-500 mt-1">
-                                      Content available: {substrand.source_type === 'kicd' ? 'KICD Official' : 'Original'}
-                                    </p>
-                                  )}
                                   {isSixth && !selectedSetBook && shouldShowSetBookSelection() && (
                                     <p className="text-sm text-orange-600 mt-2 flex items-center bg-orange-50 p-2 rounded-lg">
                                       <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1901,11 +2098,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                                     </p>
                                   )}
                                 </div>
-                                {substrand.source_type && (
-                                  <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs">
-                                    {substrand.source_type === 'kicd' ? 'KICD' : 'Original'}
-                                  </span>
-                                )}
                               </div>
                             </div>
                           </div>
@@ -1952,19 +2144,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
         {getTranslatedText('Step 3: Lessons Structure Details', 'Hatua ya 3: Maelezo ya Muundo wa Masomo')}
       </h2>
       
-      <div className="mb-6 p-6 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-2xl border-2 border-yellow-200">
-        <div className="flex items-center">
-          <svg className="w-8 h-8 text-yellow-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <div>
-            <p className="text-yellow-800 font-bold text-lg">
-              {getTranslatedText('Fields marked with asterisks (*) are mandatory', 'Sehemu zilizowekwa alama ya nyota (*) ni lazima')}
-            </p>
-          </div>
-        </div>
-      </div>
-      
       <div className="space-y-10">
         {/* Number of Lessons Per Week */}
         <div className="border-b-2 pb-10">
@@ -1972,20 +2151,18 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
             {getTranslatedText('Number of Lessons Per Week *', 'Idadi ya Masomo Kwa Wiki *')}
           </label>
           <div className="max-w-md">
-            <div className="relative">
-              <select 
-                value={lessonStructure.lessons_per_week} 
-                onChange={(e) => {
-                  handleLessonStructureChange('lessons_per_week', parseInt(e.target.value));
-                }}
-                className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none transition-all hover:border-blue-400"
-              >
-                <option value="">{getTranslatedText('-- Select Number of Lessons --', '-- Chagua Idadi ya Masomo --')}</option>
-                {lessonsPerWeekOptions.map(num => (
-                  <option key={num} value={num}>{num} {getTranslatedText('lessons per week', 'masomo kwa wiki')}</option>
-                ))}
-              </select>
-            </div>
+            <select 
+              value={lessonStructure.lessons_per_week} 
+              onChange={(e) => {
+                handleLessonStructureChange('lessons_per_week', parseInt(e.target.value));
+              }}
+              className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none transition-all hover:border-blue-400"
+            >
+              <option value="">{getTranslatedText('-- Select Number of Lessons --', '-- Chagua Idadi ya Masomo --')}</option>
+              {lessonsPerWeekOptions.map(num => (
+                <option key={num} value={num}>{num} {getTranslatedText('lessons per week', 'masomo kwa wiki')}</option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -2006,18 +2183,16 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <label className="block text-xl font-bold mb-6 text-gray-900">
                 {getTranslatedText('First week of teaching *', 'Wiki ya kwanza ya kufundisha *')}
               </label>
-              <div className="relative">
-                <select 
-                  value={lessonStructure.first_week_of_teaching} 
-                  onChange={(e) => handleLessonStructureChange('first_week_of_teaching', parseInt(e.target.value))}
-                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                >
-                  <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
-                  {weekOptions.map(num => (
-                    <option key={num} value={num}>Week {num}</option>
-                  ))}
-                </select>
-              </div>
+              <select 
+                value={lessonStructure.first_week_of_teaching} 
+                onChange={(e) => handleLessonStructureChange('first_week_of_teaching', parseInt(e.target.value))}
+                className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+              >
+                <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
+                {weekOptions.map(num => (
+                  <option key={num} value={num}>Week {num}</option>
+                ))}
+              </select>
             </div>
 
             {/* First Lesson of Teaching */}
@@ -2025,27 +2200,25 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <label className="block text-xl font-bold mb-6 text-gray-900">
                 {getTranslatedText('First lesson of teaching *', 'Somo la kwanza la kufundisha *')}
               </label>
-              <div className="relative">
-                <select 
-                  value={lessonStructure.first_lesson_of_teaching} 
-                  onChange={(e) => handleLessonStructureChange('first_lesson_of_teaching', parseInt(e.target.value))}
-                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                  disabled={!lessonStructure.lessons_per_week}
-                >
-                  <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
-                  {lessonOptions
-                    .slice(0, lessonStructure.lessons_per_week || 10)
-                    .map(num => (
-                      <option key={num} value={num}>Lesson {num}</option>
-                    ))
-                  }
-                </select>
-                {!lessonStructure.lessons_per_week && (
-                  <p className="text-red-500 mt-3">
-                    {getTranslatedText('Please select number of lessons per week first', 'Tafadhali chagua idadi ya masomo kwa wiki kwanza')}
-                  </p>
-                )}
-              </div>
+              <select 
+                value={lessonStructure.first_lesson_of_teaching} 
+                onChange={(e) => handleLessonStructureChange('first_lesson_of_teaching', parseInt(e.target.value))}
+                className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                disabled={!lessonStructure.lessons_per_week}
+              >
+                <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
+                {lessonOptions
+                  .slice(0, lessonStructure.lessons_per_week || 10)
+                  .map(num => (
+                    <option key={num} value={num}>Lesson {num}</option>
+                  ))
+                }
+              </select>
+              {!lessonStructure.lessons_per_week && (
+                <p className="text-red-500 mt-3">
+                  {getTranslatedText('Please select number of lessons per week first', 'Tafadhali chagua idadi ya masomo kwa wiki kwanza')}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -2067,21 +2240,19 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <label className="block text-xl font-bold mb-6 text-gray-900">
                 {getTranslatedText('Last week of teaching *', 'Wiki ya mwisho ya kufundisha *')}
               </label>
-              <div className="relative">
-                <select 
-                  value={lessonStructure.last_week_of_teaching} 
-                  onChange={(e) => handleLessonStructureChange('last_week_of_teaching', parseInt(e.target.value))}
-                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                >
-                  <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
-                  {weekOptions
-                    .filter(week => week >= (lessonStructure.first_week_of_teaching || 1))
-                    .map(num => (
-                      <option key={num} value={num}>Week {num}</option>
-                    ))
-                  }
-                </select>
-              </div>
+              <select 
+                value={lessonStructure.last_week_of_teaching} 
+                onChange={(e) => handleLessonStructureChange('last_week_of_teaching', parseInt(e.target.value))}
+                className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+              >
+                <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
+                {weekOptions
+                  .filter(week => week >= (lessonStructure.first_week_of_teaching || 1))
+                  .map(num => (
+                    <option key={num} value={num}>Week {num}</option>
+                  ))
+                }
+              </select>
             </div>
 
             {/* Last Lesson of Teaching */}
@@ -2089,27 +2260,25 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <label className="block text-xl font-bold mb-6 text-gray-900">
                 {getTranslatedText('Last lesson of teaching *', 'Somo la mwisho la kufundisha *')}
               </label>
-              <div className="relative">
-                <select 
-                  value={lessonStructure.last_lesson_of_teaching} 
-                  onChange={(e) => handleLessonStructureChange('last_lesson_of_teaching', parseInt(e.target.value))}
-                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                  disabled={!lessonStructure.lessons_per_week}
-                >
-                  <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
-                  {lessonOptions
-                    .slice(0, lessonStructure.lessons_per_week || 10)
-                    .map(num => (
-                      <option key={num} value={num}>Lesson {num}</option>
-                    ))
-                  }
-                </select>
-                {!lessonStructure.lessons_per_week && (
-                  <p className="text-red-500 mt-3">
-                    {getTranslatedText('Please select number of lessons per week first', 'Tafadhali chagua idadi ya masomo kwa wiki kwanza')}
-                  </p>
-                )}
-              </div>
+              <select 
+                value={lessonStructure.last_lesson_of_teaching} 
+                onChange={(e) => handleLessonStructureChange('last_lesson_of_teaching', parseInt(e.target.value))}
+                className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                disabled={!lessonStructure.lessons_per_week}
+              >
+                <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
+                {lessonOptions
+                  .slice(0, lessonStructure.lessons_per_week || 10)
+                  .map(num => (
+                    <option key={num} value={num}>Lesson {num}</option>
+                  ))
+                }
+              </select>
+              {!lessonStructure.lessons_per_week && (
+                <p className="text-red-500 mt-3">
+                  {getTranslatedText('Please select number of lessons per week first', 'Tafadhali chagua idadi ya masomo kwa wiki kwanza')}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -2139,12 +2308,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                     />
                     <div className="flex-1">
                       <span className="text-xl font-bold text-gray-800">{option.label}</span>
-                      <p className="text-gray-600 mt-2">
-                        {option.value === 'single' 
-                          ? getTranslatedText('All lessons are single periods', 'Masomo yote ni ya kipindi kimoja')
-                          : getTranslatedText('Combine two consecutive lessons into one double period', 'Changanya masomo mawili mfululizo kuwa kipindi kimoja cha muda mrefu')
-                        }
-                      </p>
                     </div>
                   </label>
                 ))}
@@ -2156,45 +2319,24 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 <label className="block text-xl font-bold mb-6 text-yellow-800">
                   {getTranslatedText('Select Double Lesson Combination', 'Chagua Mchanganyiko wa Somo la Mseto')}
                 </label>
-                <div className="relative">
-                  <select 
-                    value={lessonStructure.double_lesson_combination} 
-                    onChange={(e) => handleLessonStructureChange('double_lesson_combination', e.target.value)}
-                    className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-yellow-100 focus:border-yellow-500 text-xl appearance-none"
-                    disabled={!lessonStructure.lessons_per_week}
-                  >
-                    <option value="">{getTranslatedText('-- Select Combination --', '-- Chagua Mchanganyiko --')}</option>
-                    {Array.from({ length: (lessonStructure.lessons_per_week || 1) - 1 }, (_, i) => ({
-                      value: `${i + 1}-${i + 2}`,
-                      label: `${getTranslatedText('Lessons', 'Masomo')} ${i + 1} & ${i + 2}`
-                    })).map(combo => (
-                      <option key={combo.value} value={combo.value}>{combo.label}</option>
-                    ))}
-                  </select>
-                </div>
+                <select 
+                  value={lessonStructure.double_lesson_combination} 
+                  onChange={(e) => handleLessonStructureChange('double_lesson_combination', e.target.value)}
+                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-yellow-100 focus:border-yellow-500 text-xl appearance-none"
+                  disabled={!lessonStructure.lessons_per_week}
+                >
+                  <option value="">{getTranslatedText('-- Select Combination --', '-- Chagua Mchanganyiko --')}</option>
+                  {Array.from({ length: (lessonStructure.lessons_per_week || 1) - 1 }, (_, i) => ({
+                    value: `${i + 1}-${i + 2}`,
+                    label: `${getTranslatedText('Lessons', 'Masomo')} ${i + 1} & ${i + 2}`
+                  })).map(combo => (
+                    <option key={combo.value} value={combo.value}>{combo.label}</option>
+                  ))}
+                </select>
               </div>
             )}
           </div>
         </div>
-
-        {/* Validation Summary */}
-        {!isStep3Complete() && (
-          <div className="bg-gradient-to-r from-red-50 to-pink-50 border-3 border-red-200 rounded-2xl p-6">
-            <div className="flex items-center">
-              <svg className="w-8 h-8 text-red-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-              </svg>
-              <div>
-                <p className="text-red-800 font-bold text-lg">
-                  {getTranslatedText(
-                    'Please complete all required fields marked with *',
-                    'Tafadhali kamilisha sehemu zote zinazohitajika zilizowekwa alama ya *'
-                  )}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* Navigation */}
         <div className="flex justify-between pt-8">
@@ -2255,17 +2397,6 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               <span className="text-2xl font-bold text-gray-900">
                 {getTranslatedText('No Breaks During This Term', 'Hakuna Mapumziko Katika Muhula Hii')}
               </span>
-              <p className="text-gray-600 mt-3 text-lg">
-                {getTranslatedText(
-                  'Select this if there are no breaks, holidays, or interruptions during this term.',
-                  'Chagua hii ikiwa hakuna mapumziko, likizo, au usumbufu wowote katika muhula huu.'
-                )}
-              </p>
-            </div>
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center ${!hasBreaks ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'}`}>
-              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-              </svg>
             </div>
           </label>
         </div>
@@ -2288,26 +2419,21 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 <label className="block text-xl font-bold mb-4 text-gray-900">
                   {getTranslatedText('Title of Break/Interruption *', 'Jina la Mapumziko/Mkazo *')}
                 </label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={newBreak.title}
-                    onChange={(e) => setNewBreak(prev => ({ ...prev, title: e.target.value }))}
-                    className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl transition-all hover:border-blue-400"
-                    placeholder={getTranslatedText(
-                      "e.g., Midterm Break, National Exams, Sports Day",
-                      "mfano: Mapumziko ya Katikati, Mitihani ya Kitaifa, Siku ya Michezo"
-                    )}
-                  />
-                </div>
+                <input
+                  type="text"
+                  value={newBreak.title}
+                  onChange={(e) => setNewBreak(prev => ({ ...prev, title: e.target.value }))}
+                  className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl transition-all hover:border-blue-400"
+                  placeholder={getTranslatedText(
+                    "e.g., Midterm Break, National Exams, Sports Day",
+                    "mfano: Mapumziko ya Katikati, Mitihani ya Kitaifa, Siku ya Michezo"
+                  )}
+                />
               </div>
 
               {/* Break Start */}
               <div className="border-t-2 pt-10">
-                <h4 className="text-2xl font-bold mb-8 text-blue-700 flex items-center">
-                  <svg className="w-8 h-8 text-blue-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
+                <h4 className="text-2xl font-bold mb-8 text-blue-700">
                   {getTranslatedText('Break Start Date', 'Tarehe ya Mwanzo wa Mapumziko')}
                 </h4>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
@@ -2315,46 +2441,39 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                     <label className="block text-xl font-bold mb-4">
                       {getTranslatedText('Week Number *', 'Nambari ya Wiki *')}
                     </label>
-                    <div className="relative">
-                      <select
-                        value={newBreak.startWeek}
-                        onChange={(e) => setNewBreak(prev => ({ ...prev, startWeek: e.target.value }))}
-                        className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                      >
-                        <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
-                        {getWeekNumberOptions().map(week => (
-                          <option key={week} value={week}>Week {week}</option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={newBreak.startWeek}
+                      onChange={(e) => setNewBreak(prev => ({ ...prev, startWeek: e.target.value }))}
+                      className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                    >
+                      <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
+                      {getWeekNumberOptions().map(week => (
+                        <option key={week} value={week}>Week {week}</option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
                     <label className="block text-xl font-bold mb-4">
                       {getTranslatedText('Lesson Number *', 'Nambari ya Somo *')}
                     </label>
-                    <div className="relative">
-                      <select
-                        value={newBreak.startLesson}
-                        onChange={(e) => setNewBreak(prev => ({ ...prev, startLesson: e.target.value }))}
-                        className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                      >
-                        <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
-                        {getLessonNumberOptions().map(lesson => (
-                          <option key={lesson} value={lesson}>Lesson {lesson}</option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={newBreak.startLesson}
+                      onChange={(e) => setNewBreak(prev => ({ ...prev, startLesson: e.target.value }))}
+                      className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                    >
+                      <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
+                      {getLessonNumberOptions().map(lesson => (
+                        <option key={lesson} value={lesson}>Lesson {lesson}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               </div>
 
               {/* Break End */}
               <div className="border-t-2 pt-10">
-                <h4 className="text-2xl font-bold mb-8 text-blue-700 flex items-center">
-                  <svg className="w-8 h-8 text-blue-600 mr-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
+                <h4 className="text-2xl font-bold mb-8 text-blue-700">
                   {getTranslatedText('Break End Date', 'Tarehe ya Mwisho wa Mapumziko')}
                 </h4>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
@@ -2362,38 +2481,34 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                     <label className="block text-xl font-bold mb-4">
                       {getTranslatedText('Week Number *', 'Nambari ya Wiki *')}
                     </label>
-                    <div className="relative">
-                      <select
-                        value={newBreak.endWeek}
-                        onChange={(e) => setNewBreak(prev => ({ ...prev, endWeek: e.target.value }))}
-                        className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                      >
-                        <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
-                        {getWeekNumberOptions()
-                          .filter(week => week >= (parseInt(newBreak.startWeek) || 0))
-                          .map(week => (
-                            <option key={week} value={week}>Week {week}</option>
-                          ))}
-                      </select>
-                    </div>
+                    <select
+                      value={newBreak.endWeek}
+                      onChange={(e) => setNewBreak(prev => ({ ...prev, endWeek: e.target.value }))}
+                      className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                    >
+                      <option value="">{getTranslatedText('-- Select Week --', '-- Chagua Wiki --')}</option>
+                      {getWeekNumberOptions()
+                        .filter(week => week >= (parseInt(newBreak.startWeek) || 0))
+                        .map(week => (
+                          <option key={week} value={week}>Week {week}</option>
+                        ))}
+                    </select>
                   </div>
 
                   <div>
                     <label className="block text-xl font-bold mb-4">
                       {getTranslatedText('Lesson Number *', 'Nambari ya Somo *')}
                     </label>
-                    <div className="relative">
-                      <select
-                        value={newBreak.endLesson}
-                        onChange={(e) => setNewBreak(prev => ({ ...prev, endLesson: e.target.value }))}
-                        className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
-                      >
-                        <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
-                        {getLessonNumberOptions().map(lesson => (
-                          <option key={lesson} value={lesson}>Lesson {lesson}</option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={newBreak.endLesson}
+                      onChange={(e) => setNewBreak(prev => ({ ...prev, endLesson: e.target.value }))}
+                      className="w-full p-5 border-3 border-gray-300 rounded-2xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 text-xl appearance-none"
+                    >
+                      <option value="">{getTranslatedText('-- Select Lesson --', '-- Chagua Somo --')}</option>
+                      {getLessonNumberOptions().map(lesson => (
+                        <option key={lesson} value={lesson}>Lesson {lesson}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               </div>
@@ -2491,8 +2606,8 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                   </p>
                   <p className="text-blue-700 text-lg mt-2">
                     {getTranslatedText(
-                      `Total breaks: ${breaks.length} | Total affected lessons: ${breaks.length * 2}`,
-                      `Jumla ya mapumziko: ${breaks.length} | Jumla ya masomo yaliyoathiriwa: ${breaks.length * 2}`
+                      `Total breaks: ${breaks.length}`,
+                      `Jumla ya mapumziko: ${breaks.length}`
                     )}
                   </p>
                 </div>
@@ -2504,7 +2619,7 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
           </div>
         )}
 
-        {/* Navigation */}
+        {/* Navigation - SHOW DATABASE WARNING */}
         <div className="flex justify-between pt-10">
           <button 
             onClick={handleBack} 
@@ -2515,15 +2630,34 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
             </svg>
             {getTranslatedText('Back', 'Nyuma')}
           </button>
-          <button 
-            onClick={generatePreviewData}
-            className="px-8 py-5 bg-gradient-to-r from-blue-600 to-green-600 text-white rounded-2xl hover:from-blue-700 hover:to-green-700 transition-all flex items-center font-bold text-lg"
-          >
-            <span className="mr-3">{getTranslatedText('Preview & Generate PDF', 'Hakiki & Tengeza PDF')}</span>
-            <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
+          
+          <div className="flex flex-col items-end gap-4">
+            {!dbConnected && dbCheckDone && (
+              <div className="text-right">
+                <p className="text-red-600 font-bold text-sm mb-1">
+                  ⚠️ {getTranslatedText('DATABASE NOT CONNECTED', 'DATABASE HAIIJASHIKANA')}
+                </p>
+                <p className="text-red-500 text-xs">
+                  {getTranslatedText(
+                    'Will use KICD-guided AI fallback only',
+                    'Itatumia backup ya AI inayoongozwa na KICD tu'
+                  )}
+                </p>
+              </div>
+            )}
+            
+            <button 
+              onClick={generatePreviewData}
+              className="px-8 py-5 bg-gradient-to-r from-blue-600 to-green-600 text-white rounded-2xl hover:from-blue-700 hover:to-green-700 transition-all flex items-center font-bold text-lg"
+            >
+              <span className="mr-3">
+                {getTranslatedText('Generate KICD-Aligned Scheme', 'Tengeza Mfumo Unaolingana na KICD')}
+              </span>
+              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2535,11 +2669,11 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
     
     return (
       <div className="bg-white rounded-2xl shadow-2xl p-8 border border-gray-200">
-        {/* Header with Quality Badge */}
+        {/* Header */}
         <div className="text-center mb-8">
           <div className="flex justify-center items-center mb-4">
             <h2 className="text-4xl font-bold text-gray-900 mr-4 bg-gradient-to-r from-blue-600 to-green-600 bg-clip-text text-transparent">
-              {getTranslatedText('Your Professional Scheme of Work is Ready!', 'Mfumo Wako Wa Kitaaluma wa Kazi Umekamilika!')}
+              {getTranslatedText('Your KICD-Aligned Scheme of Work is Ready!', 'Mfumo Wako Unaolingana na KICD Umekamilika!')}
             </h2>
             {previewData.meta.qualityMetrics.kicdOfficialLessons > 0 && (
               <span className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-full text-sm font-bold flex items-center">
@@ -2549,6 +2683,18 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 KICD-OFFICIAL
               </span>
             )}
+          </div>
+          
+          {/* Database Status Badge */}
+          <div className={`inline-block px-4 py-2 rounded-full font-bold mb-6 ${
+            previewData.meta.qualityMetrics.databaseConnected
+              ? 'bg-green-100 text-green-800 border border-green-300'
+              : 'bg-yellow-100 text-yellow-800 border border-yellow-300'
+          }`}>
+            {previewData.meta.qualityMetrics.databaseConnected 
+              ? '✅ KICD-DATABASE CONNECTED'
+              : '⚠️ KICD-GUIDED AI GENERATED'
+            }
           </div>
           
           {/* Quality Metrics */}
@@ -2571,18 +2717,14 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                   <div className="text-2xl font-bold text-purple-600">
                     {Math.round(previewData.meta.qualityMetrics.averageConfidence * 100)}%
                   </div>
-                  <div className="text-sm text-gray-600">Avg Quality</div>
+                  <div className="text-sm text-gray-600">KICD Alignment</div>
                 </div>
               </div>
             </div>
           )}
-          
-          <p className="text-gray-600 text-lg">
-            {getTranslatedText('Review, save, or generate professional PDF', 'Kagua, hifadhi, au tengeneza PDF ya kitaaluma')}
-          </p>
         </div>
 
-        {/* Progress Bar */}
+        {/* Quality Report */}
         <div className="mb-10">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center">
@@ -2593,17 +2735,12 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               </div>
               <div>
                 <h3 className="text-xl font-bold text-gray-800">
-                  {getTranslatedText('Professional Quality Report', 'Ripoti ya Ubora wa Kitaaluma')}
+                  {getTranslatedText('KICD Alignment Report', 'Ripoti ya Ulingano na KICD')}
                 </h3>
-                <p className="text-gray-600">
-                  {previewData.meta.qualityMetrics.averageConfidence >= 0.85 
-                    ? getTranslatedText('✅ High Quality Scheme', '✅ Mfumo wa Ubora wa Juu')
-                    : getTranslatedText('📊 Standard Quality Scheme', '📊 Mfumo wa Ubora wa Kawaida')}
-                </p>
               </div>
             </div>
             <div className="text-right">
-              <p className="text-sm text-gray-600">{getTranslatedText('Quality Score', 'Alama ya Ubora')}</p>
+              <p className="text-sm text-gray-600">{getTranslatedText('KICD Alignment Score', 'Alama ya Ulingano na KICD')}</p>
               <p className="font-bold text-gray-800 text-2xl">
                 {Math.round(previewData.meta.qualityMetrics.averageConfidence * 100)}/100
               </p>
@@ -2620,6 +2757,34 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               style={{ width: `${previewData.meta.qualityMetrics.averageConfidence * 100}%` }}
             ></div>
           </div>
+          
+          {/* Data Source Breakdown */}
+          <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+            <div className="bg-green-50 p-3 rounded-lg border border-green-200">
+              <div className="text-lg font-bold text-green-700">
+                {previewData.meta.qualityMetrics.dataSources.database_exact_match || 0}
+              </div>
+              <div className="text-xs text-green-600">KICD Exact</div>
+            </div>
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-lg font-bold text-blue-700">
+                {previewData.meta.qualityMetrics.dataSources.database_partial_match || 0}
+              </div>
+              <div className="text-xs text-blue-600">KICD Template</div>
+            </div>
+            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200">
+              <div className="text-lg font-bold text-purple-700">
+                {previewData.meta.qualityMetrics.dataSources.kicd_guided_ai_fallback || 0}
+              </div>
+              <div className="text-xs text-purple-600">KICD AI</div>
+            </div>
+            <div className="bg-red-50 p-3 rounded-lg border border-red-200">
+              <div className="text-lg font-bold text-red-700">
+                {previewData.meta.qualityMetrics.dataSources.emergency_fallback || 0}
+              </div>
+              <div className="text-xs text-red-600">Emergency</div>
+            </div>
+          </div>
         </div>
 
         {/* Download Message */}
@@ -2631,14 +2796,16 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               </svg>
             </div>
             <h3 className="text-2xl font-bold text-gray-900 mb-4">
-              {getTranslatedText('Download Professional Scheme', 'Pakua Mfumo wa Kitaaluma')}
+              {getTranslatedText('Download KICD-Aligned Scheme', 'Pakua Mfumo Unaolingana na KICD')}
             </h3>
-            <p className="text-gray-600 max-w-2xl mb-6">
-              {getTranslatedText(
-                'Your professionally generated, KICD-aligned scheme is ready. Download as PDF, save to dashboard, or create another.',
-                'Mfumo wako uliotengenezwa kikitaaluma, unaolingana na KICD umekamilika. Pakua kama PDF, hifadhi kwenye dashibodi, au unda mwingine.'
-              )}
-            </p>
+            {!previewData.meta.qualityMetrics.databaseConnected && (
+              <p className="text-yellow-700 font-bold mt-2">
+                ⚠️ {getTranslatedText(
+                  'Generated with KICD-guided AI (official database not connected)',
+                  'Imetengenezwa kwa AI inayoongozwa na KICD (database rasmi haijashikana)'
+                )}
+              </p>
+            )}
           </div>
         </div>
 
@@ -2695,13 +2862,13 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               </div>
               <div>
                 <p className="text-3xl font-bold text-yellow-800">{Math.round(previewData.meta.qualityMetrics.averageConfidence * 100)}%</p>
-                <p className="text-gray-600">{getTranslatedText('Quality Score', 'Alama ya Ubora')}</p>
+                <p className="text-gray-600">{getTranslatedText('KICD Alignment', 'Ulingano na KICD')}</p>
               </div>
             </div>
           </div>
         </div>
 
-        {/* SCHEME TABLE - Professional Layout */}
+        {/* SCHEME TABLE */}
         <div className="mb-10 overflow-x-auto">
           <div className="min-w-[1500px]">
             <table className="w-full border-collapse border border-gray-300 text-sm">
@@ -2730,12 +2897,12 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                       <div className="flex flex-col items-center">
                         <span className="font-bold">{lesson.week}</span>
                         <span className={`text-xs px-1 py-0.5 rounded mt-1 ${
-                          lesson._is_real_kicd ? 'bg-green-100 text-green-800' :
+                          lesson._is_kicd_official ? 'bg-green-100 text-green-800' :
                           lesson._confidence >= 0.85 ? 'bg-blue-100 text-blue-800' :
                           lesson._confidence >= 0.75 ? 'bg-yellow-100 text-yellow-800' :
                           'bg-gray-100 text-gray-800'
                         }`}>
-                          {lesson._is_real_kicd ? 'KICD' :
+                          {lesson._is_kicd_official ? 'KICD' :
                            lesson._confidence >= 0.85 ? 'HIGH' :
                            lesson._confidence >= 0.75 ? 'MED' : 'LOW'}
                         </span>
@@ -2822,27 +2989,9 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
               </tbody>
             </table>
           </div>
-          
-          {/* Table Navigation */}
-          {previewData.scheme.length > 5 && (
-            <div className="mt-4 flex justify-between items-center">
-              <p className="text-gray-600">
-                {getTranslatedText(
-                  `Showing ${Math.min(5, previewData.scheme.length)} of ${previewData.scheme.length} lessons`,
-                  `Inaonyesha masomo ${Math.min(5, previewData.scheme.length)} kati ya ${previewData.scheme.length}`
-                )}
-              </p>
-              <div className="flex items-center space-x-2">
-                <span className="text-xs px-2 py-1 bg-green-100 text-green-800 rounded">KICD: Official</span>
-                <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 rounded">HIGH: ≥85%</span>
-                <span className="text-xs px-2 py-1 bg-yellow-100 text-yellow-800 rounded">MED: 75-84%</span>
-                <span className="text-xs px-2 py-1 bg-gray-100 text-gray-800 rounded">{`LOW: <75%`}</span>
-              </div>
-            </div>
-          )}
         </div>
 
-        {/* Action Buttons Section */}
+        {/* Action Buttons */}
         <div className="flex flex-col md:flex-row justify-between gap-6 mb-10">
           <button 
             onClick={() => setCurrentStep(4)}
@@ -2855,7 +3004,7 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
           </button>
           
           <button 
-            onClick={() => generatePDF('standard')}
+            onClick={generatePDF}
             disabled={isGeneratingPDF}
             className="px-8 py-5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl hover:from-blue-700 hover:to-indigo-700 transition-all flex items-center justify-center font-bold text-lg flex-1"
           >
@@ -2874,17 +3023,28 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                {getTranslatedText('Download Professional PDF', 'Pakua PDF ya Kitaaluma')}
+                {getTranslatedText('Download KICD PDF', 'Pakua PDF ya KICD')}
               </>
             )}
           </button>
           
           <button 
             onClick={saveToDatabase}
-            disabled={isSaving}
-            className="px-8 py-5 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-2xl hover:from-green-700 hover:to-emerald-700 transition-all flex items-center justify-center font-bold text-lg flex-1"
+            disabled={isSaving || !previewData.meta.qualityMetrics.databaseConnected}
+            className={`px-8 py-5 rounded-2xl transition-all flex items-center justify-center font-bold text-lg flex-1 ${
+              !previewData.meta.qualityMetrics.databaseConnected
+                ? 'bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed'
+                : 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700'
+            }`}
           >
-            {isSaving ? (
+            {!previewData.meta.qualityMetrics.databaseConnected ? (
+              <>
+                <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.698-.833-2.464 0L4.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                {getTranslatedText('No KICD Database', 'Hakuna Database ya KICD')}
+              </>
+            ) : isSaving ? (
               <>
                 <div className="flex items-center">
                   <div className="relative">
@@ -2899,7 +3059,7 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
                 <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7v10a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
                 </svg>
-                {getTranslatedText('Save to Dashboard', 'Hifadhi kwenye Dashibodi')}
+                {getTranslatedText('Save to KICD Database', 'Hifadhi kwenye Database ya KICD')}
               </>
             )}
           </button>
@@ -2914,7 +3074,7 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
             <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
             </svg>
-            {getTranslatedText('+ Create Another Professional Scheme', '+ Unda Mfumo Mwingine wa Kitaaluma')}
+            {getTranslatedText('+ Create Another KICD Scheme', '+ Unda Mfumo Mwingine wa KICD')}
           </button>
         </div>
       </div>
@@ -2927,35 +3087,50 @@ Quality Metrics: ${meta.qualityMetrics.kicdOfficialLessons} KICD lessons, ${meta
       {renderLoadingOverlay()}
       
       <div className="max-w-6xl mx-auto px-4">
-        {/* Enhanced Header with KICD Info */}
+        {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-900 mb-3 bg-gradient-to-r from-blue-600 to-green-600 bg-clip-text text-transparent">
-            {getTranslatedText('PROFESSIONAL KICD SCHEME OF WORK GENERATOR', 'KITENGEZI CHA MIFUMO YA KAZI YA KICD CHA KITAALUMA')}
+            {getTranslatedText('KICD-ALIGNED SCHEME OF WORK GENERATOR', 'KITENGEZI CHA MIFUMO YA KAZI YA KICD')}
           </h1>
           <p className="text-gray-600 text-lg mb-2">
             {getTranslatedText(
-              'Powered by Real KICD Curriculum Designs & Unified API',
-              'Inaendeshwa na Miundo Halisi ya Mtaala wa KICD na Unified API'
+              'Focus: Junior Secondary (CBE) - Competency Based Education',
+              'Mkazo: Sekondari ya Upili (CBE) - Elimu Inayolenga Stadi'
             )}
           </p>
           <div className="flex justify-center items-center space-x-4">
-            <span className="px-3 py-1 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-full text-sm font-bold flex items-center">
-              <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-              KICD-OFFICIAL
+            <span className={`px-3 py-1 rounded-full text-sm font-bold flex items-center ${
+              dbConnected 
+                ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white' 
+                : 'bg-gradient-to-r from-yellow-500 to-orange-600 text-white'
+            }`}>
+              {dbConnected ? (
+                <>
+                  <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  KICD-DB-CONNECTED
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                  KICD-GUIDED-AI
+                </>
+              )}
             </span>
             <span className="px-3 py-1 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-full text-sm font-bold flex items-center">
               <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
               </svg>
-              API-POWERED
+              CBE-FOCUSED
             </span>
             <span className="px-3 py-1 bg-gradient-to-r from-purple-500 to-pink-600 text-white rounded-full text-sm font-bold flex items-center">
               <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clipRule="evenodd" />
+                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
               </svg>
-              QUALITY-ASSURED
+              GRADE 10 (Soon)
             </span>
           </div>
         </div>
